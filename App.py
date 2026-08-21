@@ -2,8 +2,7 @@ import streamlit as st
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+import requests as _requests
 from PIL import Image
 import io
 import json
@@ -13,12 +12,9 @@ import uuid
 # ── Config ──────────────────────────────────────────────────────────────────
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+    ]
 CUSTOMER_SHEET_ID   = "113E5fKvZ0wWloSbQ9IQo8QiCOz5C3zlJr28012PbXz4"  # Spreadsheet Database Koordinat Bogor
 SUBMISSION_SHEET_ID = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"  # Sheet output (sama, tab berbeda)
-DRIVE_FOLDER_ID     = "19ZIk2g8hsr6dmU2KW2y78Q4KS3Y47WGX"
-
 IMAGE_MAX_PX  = 1920
 IMAGE_QUALITY = 75
 
@@ -31,10 +27,6 @@ def get_credentials():
 @st.cache_resource
 def get_gspread():
     return gspread.authorize(get_credentials())
-
-@st.cache_resource
-def get_drive():
-    return build("drive", "v3", credentials=get_credentials())
 
 # ── Data loaders ─────────────────────────────────────────────────────────────
 def _sheet_to_df(ws) -> pd.DataFrame:
@@ -83,23 +75,25 @@ def compress_image(uploaded_file) -> bytes:
     img.save(buf, format="JPEG", quality=IMAGE_QUALITY, optimize=True)
     return buf.getvalue()
 
-# ── Drive upload ──────────────────────────────────────────────────────────────
-def upload_to_drive(data: bytes, filename: str, folder_id: str) -> str:
+# ── ImgBB upload ─────────────────────────────────────────────────────────────
+def upload_to_imgbb(data: bytes, filename: str) -> str:
     try:
-        service = get_drive()
-        meta = {"name": filename, "parents": [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype="image/jpeg", resumable=False)
-        f = service.files().create(body=meta, media_body=media, fields="id, webViewLink").execute()
-        try:
-            service.permissions().create(
-                fileId=f["id"],
-                body={"type": "anyone", "role": "reader"},
-            ).execute()
-        except Exception:
-            pass  # permission publik opsional, tidak block submit
-        return f.get("webViewLink", f"https://drive.google.com/file/d/{f['id']}/view")
+        api_key = st.secrets["imgbb_api_key"]
+        import base64
+        b64 = base64.b64encode(data).decode("utf-8")
+        resp = _requests.post(
+            "https://api.imgbb.com/1/upload",
+            data={"key": api_key, "image": b64, "name": filename},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get("success"):
+            return result["data"]["url_viewer"]
+        else:
+            raise ValueError(result.get("error", {}).get("message", "Unknown error"))
     except Exception as e:
-        st.error(f"❌ Gagal upload ke Drive: {e}")
+        st.error(f"❌ Gagal upload ke ImgBB: {e}")
         raise
 
 # ── Submission writer ─────────────────────────────────────────────────────────
@@ -227,7 +221,7 @@ if st.session_state.step >= 3:
                             return ""
                         fname = f"{ts}_{kode}_{promotor_name}_{label}_{uid}.jpg"
                         data  = compress_image(file)
-                        return upload_to_drive(data, fname, DRIVE_FOLDER_ID)
+                        return upload_to_imgbb(data, fname)
 
                     url_bayar   = safe_upload(foto_bayar,   "pembayaran")
                     url_kontrak = safe_upload(foto_kontrak, "kontrak")
