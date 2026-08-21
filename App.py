@@ -78,20 +78,19 @@ def compress_image(uploaded_file) -> bytes:
 # ── ImgBB upload ─────────────────────────────────────────────────────────────
 def upload_to_imgbb(data: bytes, filename: str) -> str:
     try:
-        api_key = st.secrets["imgbb_api_key"]
-        import base64
-        b64 = base64.b64encode(data).decode("utf-8")
+        api_key = st.secrets["imgbb_api_key"].strip()
         resp = _requests.post(
             "https://api.imgbb.com/1/upload",
-            data={"key": api_key, "image": b64, "name": filename},
-            timeout=30,
+            params={"key": api_key},
+            files={"image": (filename, data, "image/jpeg")},
+            timeout=60,
         )
-        resp.raise_for_status()
         result = resp.json()
         if result.get("success"):
             return result["data"]["url_viewer"]
         else:
-            raise ValueError(result.get("error", {}).get("message", "Unknown error"))
+            err = result.get("error", {})
+            raise ValueError(f"ImgBB error: {err}")
     except Exception as e:
         st.error(f"❌ Gagal upload ke ImgBB: {e}")
         raise
