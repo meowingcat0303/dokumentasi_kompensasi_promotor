@@ -85,16 +85,22 @@ def compress_image(uploaded_file) -> bytes:
 
 # ── Drive upload ──────────────────────────────────────────────────────────────
 def upload_to_drive(data: bytes, filename: str, folder_id: str) -> str:
-    service = get_drive()
-    meta = {"name": filename, "parents": [folder_id]}
-    media = MediaIoBaseUpload(io.BytesIO(data), mimetype="image/jpeg", resumable=False)
-    f = service.files().create(body=meta, media_body=media, fields="id, webViewLink").execute()
-    # Make publicly readable so admin bisa lihat
-    service.permissions().create(
-        fileId=f["id"],
-        body={"type": "anyone", "role": "reader"},
-    ).execute()
-    return f.get("webViewLink", "")
+    try:
+        service = get_drive()
+        meta = {"name": filename, "parents": [folder_id]}
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype="image/jpeg", resumable=False)
+        f = service.files().create(body=meta, media_body=media, fields="id, webViewLink").execute()
+        try:
+            service.permissions().create(
+                fileId=f["id"],
+                body={"type": "anyone", "role": "reader"},
+            ).execute()
+        except Exception:
+            pass  # permission publik opsional, tidak block submit
+        return f.get("webViewLink", f"https://drive.google.com/file/d/{f['id']}/view")
+    except Exception as e:
+        st.error(f"❌ Gagal upload ke Drive: {e}")
+        raise
 
 # ── Submission writer ─────────────────────────────────────────────────────────
 def append_submission(row: list):
