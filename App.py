@@ -15,7 +15,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-CUSTOMER_SHEET_ID   = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"  # Sheet data customer
+CUSTOMER_SHEET_ID   = "113E5fKvZ0wWloSbQ9IQo8QiCOz5C3zlJr28012PbXz4"  # Spreadsheet Database Koordinat Bogor
 SUBMISSION_SHEET_ID = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"  # Sheet output (sama, tab berbeda)
 DRIVE_FOLDER_ID     = "19ZIk2g8hsr6dmU2KW2y78Q4KS3Y47WGX"
 
@@ -132,6 +132,17 @@ if st.session_state.step >= 2:
     with st.expander("② Pilih Customer", expanded=(st.session_state.step == 2)):
         df_cust = load_customers()
 
+        if df_cust.empty or len(df_cust.columns) == 0:
+            st.error("❌ Data customer tidak ditemukan. Pastikan sheet customer sudah di-share ke service account dan nama sheet-nya benar.")
+            st.info("Nama sheet yang dibaca: tab pertama (sheet1) dari spreadsheet CUSTOMER_SHEET_ID")
+            st.stop()
+
+        # Detect kolom kunci — support nama kolom Database Koordinat (CUSTOMERNO, CUSTOMER, ALAMAT)
+        cols = df_cust.columns.tolist()
+        code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
+        name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
+        addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
+
         search = st.text_input("🔍 Cari kode / nama toko / alamat", key="search_input")
 
         if search:
@@ -142,13 +153,7 @@ if st.session_state.step >= 2:
         else:
             results = df_cust.head(50)
 
-        st.caption(f"Menampilkan {len(results)} baris")
-
-        # Detect kolom kunci
-        cols = df_cust.columns.tolist()
-        code_col = next((c for c in cols if "kode" in c.lower()), cols[0])
-        name_col = next((c for c in cols if "nama" in c.lower() or "toko" in c.lower()), cols[1] if len(cols) > 1 else cols[0])
-        addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
+        st.caption(f"Menampilkan {len(results)} dari {len(df_cust)} baris — kolom: {', '.join(cols)}")
 
         display_cols = [c for c in [code_col, name_col, addr_col] if c]
         st.dataframe(results[display_cols], use_container_width=True, hide_index=True)
@@ -166,6 +171,8 @@ if st.session_state.step >= 2:
                     st.session_state.selected_customer = row.to_dict()
                     st.session_state.step = 3
                     st.rerun()
+        else:
+            st.warning("Tidak ada hasil. Coba kata kunci lain.")
 
 # ── STEP 3: Upload Foto & Submit ──────────────────────────────────────────────
 if st.session_state.step >= 3:
@@ -174,8 +181,8 @@ if st.session_state.step >= 3:
 
         if cust:
             cols = list(cust.keys())
-            code_col = next((c for c in cols if "kode" in c.lower()), cols[0])
-            name_col = next((c for c in cols if "nama" in c.lower() or "toko" in c.lower()), cols[1] if len(cols) > 1 else cols[0])
+            code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
+            name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
             addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
 
             st.markdown(f"""
