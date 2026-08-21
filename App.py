@@ -144,29 +144,47 @@ if st.session_state.step >= 2:
         name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
         addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
 
-        search = st.text_input("🔍 Cari kode / nama toko / alamat", key="search_input")
+        # Mode search
+        search_mode = st.radio(
+            "Cari berdasarkan:",
+            ["Nama Toko", "Kode Customer"],
+            horizontal=True,
+            key="search_mode",
+        )
+
+        if search_mode == "Nama Toko":
+            search = st.text_input("🔍 Ketik nama toko", key="search_input")
+            search_col = name_col
+        else:
+            search = st.text_input("🔍 Ketik kode customer", key="search_input")
+            search_col = code_col
 
         if search:
-            mask = df_cust.apply(
-                lambda col: col.astype(str).str.contains(search, case=False, na=False)
-            ).any(axis=1)
+            mask = df_cust[search_col].astype(str).str.contains(search, case=False, na=False)
             results = df_cust[mask]
         else:
             results = df_cust.head(50)
 
-        st.caption(f"Menampilkan {len(results)} dari {len(df_cust)} baris — kolom: {', '.join(cols)}")
+        st.caption(f"Menampilkan {len(results)} dari {len(df_cust)} data")
 
         display_cols = [c for c in [code_col, name_col, addr_col] if c]
         st.dataframe(results[display_cols], use_container_width=True, hide_index=True)
 
-        # Dropdown pilih dari hasil search
+        # Dropdown — label gabungan nama toko (kode)
         if not results.empty:
-            options = results[code_col].astype(str).tolist()
-            chosen_code = st.selectbox("Pilih Kode Customer", ["— Pilih —"] + options, key="cust_sel")
+            def make_label(r):
+                return f"{r[name_col]} ({r[code_col]})"
+            option_labels = ["— Pilih —"] + [make_label(r) for _, r in results.iterrows()]
+            chosen_label = st.selectbox("Pilih Customer", option_labels, key="cust_sel")
 
-            if chosen_code != "— Pilih —":
-                row = results[results[code_col].astype(str) == chosen_code].iloc[0]
-                st.success(f"**{row[name_col]}**" + (f" — {row[addr_col]}" if addr_col else ""))
+            if chosen_label != "— Pilih —":
+                # Cari baris yang cocok dengan label
+                idx = option_labels.index(chosen_label) - 1
+                row = results.iloc[idx]
+                st.success(
+                    f"**{row[name_col]}** ({row[code_col]})"
+                    + (f" — {row[addr_col]}" if addr_col else "")
+                )
 
                 if st.button("Konfirmasi Customer →", key="btn_step2"):
                     st.session_state.selected_customer = row.to_dict()
