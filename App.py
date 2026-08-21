@@ -262,7 +262,6 @@ if st.session_state.step >= 3:
                     append_submission(row)
 
                 st.success("✅ Dokumentasi berhasil disimpan!")
-                st.balloons()
 
                 # Reset
                 st.session_state.step = 1
