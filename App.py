@@ -52,24 +52,23 @@ def load_customers():
     return _sheet_to_df(ws)
 
 @st.cache_data(ttl=60)
-def load_config():
-    gc = get_gspread()
-    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Config")
-    return _sheet_to_df(ws)
-
 def load_promotors():
-    df = load_config()
-    col = [c for c in df.columns if "promotor" in c.lower()]
-    if col:
-        return sorted(df[col[0]].dropna().unique().tolist())
-    return []
+    gc = get_gspread()
+    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Config_NamaPromotor")
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return []
+    # Kolom pertama, skip header baris 1
+    return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
 
+@st.cache_data(ttl=60)
 def load_programs():
-    df = load_config()
-    col = [c for c in df.columns if "program" in c.lower() or "jenis" in c.lower()]
-    if col:
-        return sorted(df[col[0]].dropna().unique().tolist())
-    return []
+    gc = get_gspread()
+    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Config_NamaProgram")
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return []
+    return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
 
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
