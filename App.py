@@ -100,7 +100,7 @@ def upload_to_drive(data: bytes, filename: str) -> str:
 # ── Submission writer ─────────────────────────────────────────────────────────
 def append_submission(row: list):
     gc = get_gspread()
-    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submissions")
+    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 # ── UI ────────────────────────────────────────────────────────────────────────
