@@ -37,21 +37,25 @@ def get_drive():
     return build("drive", "v3", credentials=get_credentials())
 
 # ── Data loaders ─────────────────────────────────────────────────────────────
+def _sheet_to_df(ws) -> pd.DataFrame:
+    """Baca sheet → DataFrame tanpa masalah tipe kolom di pandas baru."""
+    rows = ws.get_all_values()
+    if not rows:
+        return pd.DataFrame()
+    headers = [str(h).strip() for h in rows[0]]
+    return pd.DataFrame(rows[1:], columns=headers)
+
 @st.cache_data(ttl=300)
 def load_customers():
     gc = get_gspread()
     ws = gc.open_by_key(CUSTOMER_SHEET_ID).sheet1
-    df = pd.DataFrame(ws.get_all_records())
-    df.columns = df.columns.str.strip()
-    return df
+    return _sheet_to_df(ws)
 
 @st.cache_data(ttl=60)
 def load_config():
     gc = get_gspread()
     ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Config")
-    df = pd.DataFrame(ws.get_all_records())
-    df.columns = df.columns.str.strip()
-    return df
+    return _sheet_to_df(ws)
 
 def load_promotors():
     df = load_config()
