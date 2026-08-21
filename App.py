@@ -76,23 +76,25 @@ def compress_image(uploaded_file) -> bytes:
     return buf.getvalue()
 
 # ── ImgBB upload ─────────────────────────────────────────────────────────────
-def upload_to_imgbb(data: bytes, filename: str) -> str:
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6BrA7TdHiFVfgsPL2b_xGDkWTqBD30tlGWpCXvQ8F2IXIjO/exec"
+
+def upload_to_drive(data: bytes, filename: str) -> str:
     try:
-        api_key = st.secrets["imgbb_api_key"].strip()
+        import base64
+        b64 = base64.b64encode(data).decode("utf-8")
         resp = _requests.post(
-            "https://api.imgbb.com/1/upload",
-            params={"key": api_key},
-            files={"image": (filename, data, "image/jpeg")},
+            APPS_SCRIPT_URL,
+            data={"image": b64, "filename": filename},
             timeout=60,
         )
+        resp.raise_for_status()
         result = resp.json()
         if result.get("success"):
-            return result["data"]["url_viewer"]
+            return result["url"]
         else:
-            err = result.get("error", {})
-            raise ValueError(f"ImgBB error: {err}")
+            raise ValueError(f"Apps Script error: {result}")
     except Exception as e:
-        st.error(f"❌ Gagal upload ke ImgBB: {e}")
+        st.error(f"❌ Gagal upload ke Drive: {e}")
         raise
 
 # ── Submission writer ─────────────────────────────────────────────────────────
@@ -220,7 +222,7 @@ if st.session_state.step >= 3:
                             return ""
                         fname = f"{ts}_{kode}_{promotor_name}_{label}_{uid}.jpg"
                         data  = compress_image(file)
-                        return upload_to_imgbb(data, fname)
+                        return upload_to_drive(data, fname)
 
                     url_bayar   = safe_upload(foto_bayar,   "pembayaran")
                     url_kontrak = safe_upload(foto_kontrak, "kontrak")
