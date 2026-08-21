@@ -105,7 +105,7 @@ def append_submission(row: list):
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Dokumentasi Kompensasi Lapangan", page_icon="📋", layout="centered")
-st.title("📋 Dokumentasi Kompensasi Lapangan")
+st.title(" Dokumentasi Kompensasi Lapangan")
 
 # Step tracker
 if "step" not in st.session_state:
