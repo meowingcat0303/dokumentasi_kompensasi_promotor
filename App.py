@@ -9,6 +9,8 @@ import json
 import datetime
 import uuid
 
+WIB = datetime.timezone(datetime.timedelta(hours=7))
+
 # ── Config ──────────────────────────────────────────────────────────────────
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -193,7 +195,7 @@ with st.expander("1. Identitas & Detail Program", expanded=(st.session_state.ste
     with col1:
         promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
     with col2:
-        tgl = st.date_input("Tanggal", value=datetime.date.today(), key="tgl_sel")
+        tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
 
     col3, col4 = st.columns(2)
     with col3:
@@ -362,7 +364,7 @@ if st.session_state.step >= 3:
                     st.error(e)
             else:
                 with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
-                    ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
                     uid = str(uuid.uuid4())[:8]
                     promotor_name = st.session_state.get("promotor_sel", "unknown")
                     kode = cust.get(code_col, "unknown")
@@ -383,11 +385,11 @@ if st.session_state.step >= 3:
                     url_kompens  = safe_upload(foto_kompens,  "kompensasi")
 
                     unique_id = f"{ts}_{uid}"
-                    submit_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
 
                     row = [
                         unique_id,
-                        str(st.session_state.get("tgl_sel", datetime.date.today())),
+                        str(st.session_state.get("tgl_sel", datetime.datetime.now(WIB).date())),
                         promotor_name,
                         st.session_state.get("program_sel", ""),
                         st.session_state.get("jenis_sel", ""),
