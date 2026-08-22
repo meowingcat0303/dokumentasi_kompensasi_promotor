@@ -49,16 +49,29 @@ def load_customers():
 
 @st.cache_data(ttl=60)
 def load_config_list(tab_name: str) -> list:
-    gc = get_gspread()
-    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet(tab_name)
-    rows = ws.get_all_values()
-    if len(rows) < 2:
+    try:
+        gc = get_gspread()
+        ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet(tab_name)
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        # Kolom pertama, skip baris header (baris 0), ambil semua nilai non-kosong
+        return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
+    except Exception as e:
+        st.warning(f"Gagal load tab '{tab_name}': {e}")
         return []
-    return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
 
-def load_promotors():  return load_config_list("Config_NamaPromotor")
-def load_rayon():      return load_config_list("Config_Rayon")
-def load_zona():       return load_config_list("Config_Zona")
+@st.cache_data(ttl=60)
+def load_promotors():
+    return load_config_list("Config_NamaPromotor")
+
+@st.cache_data(ttl=60)
+def load_rayon():
+    return load_config_list("Config_Rayon")
+
+@st.cache_data(ttl=60)
+def load_zona():
+    return load_config_list("Config_Zona")
 
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
@@ -96,53 +109,70 @@ def append_submission(row: list):
     ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
     ws.append_row(row, value_input_option="USER_ENTERED")
 
-# ── GPS helper (inject JS, baca dari query param) ─────────────────────────────
+# ── GPS helper ────────────────────────────────────────────────────────────────
 GPS_JS = """
 <script>
 function getLocation() {
+    var statusEl = document.getElementById('gps-status');
     if (!navigator.geolocation) {
-        document.getElementById('gps-status').innerText = '⚠️ Browser tidak mendukung GPS.';
+        statusEl.innerText = 'Browser tidak mendukung GPS.';
         return;
     }
-    document.getElementById('gps-status').innerText = '📡 Mengambil lokasi...';
+    statusEl.innerText = 'Mengambil lokasi...';
     navigator.geolocation.getCurrentPosition(
         function(pos) {
             var lat = pos.coords.latitude.toFixed(6);
             var lng = pos.coords.longitude.toFixed(6);
             var acc = Math.round(pos.coords.accuracy);
-            document.getElementById('gps-status').innerText =
-                '✅ Lokasi ditemukan: ' + lat + ', ' + lng + ' (±' + acc + 'm)';
-            // Kirim ke Streamlit via query param trick
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: lat + ',' + lng
-            }, '*');
-            // Fallback: isi hidden input lalu submit form
-            var inp = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="gps_hidden"]');
-            if (inp) {
-                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                nativeInputValueSetter.call(inp, lat + ',' + lng);
-                inp.dispatchEvent(new Event('input', { bubbles: true }));
+            var coords = lat + ', ' + lng;
+            statusEl.innerText = 'Lokasi ditemukan: ' + coords + ' (akurasi +/- ' + acc + ' m)';
+            // Cari input koordinat via aria-label (Streamlit set aria-label dari label widget)
+            var target = window.parent.document.querySelector('input[aria-label="koordinat_gps"]');
+            if (target) {
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(target, coords);
+                target.dispatchEvent(new Event('input', { bubbles: true }));
             }
         },
         function(err) {
-            document.getElementById('gps-status').innerText = '❌ GPS error: ' + err.message;
+            statusEl.innerText = 'Gagal mendapatkan lokasi: ' + err.message;
         },
-        { enableHighAccuracy: true, timeout: 15000 }
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
     );
 }
 </script>
 <button onclick="getLocation()" style="
-    background:#1f77b4; color:white; border:none; padding:10px 20px;
-    border-radius:6px; font-size:15px; cursor:pointer; margin-bottom:8px;">
-    📍 Ambil Lokasi GPS
+    background:#1f77b4; color:white; border:none; padding:10px 22px;
+    border-radius:6px; font-size:15px; cursor:pointer; margin-bottom:8px; width:100%;">
+    Ambil Lokasi GPS Otomatis
 </button>
-<div id="gps-status" style="color:#444; font-size:13px; margin-top:4px;"></div>
+<div id="gps-status" style="color:#444; font-size:13px; margin-top:6px;"></div>
 """
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Dokumentasi Investment Lapangan", page_icon="📋", layout="centered")
-st.title("📋 Dokumentasi Investment Lapangan")
+st.set_page_config(page_title="Dokumentasi Investment Lapangan", layout="centered")
+st.title("Dokumentasi Investment Lapangan")
+
+# ── Halaman konfirmasi setelah submit ─────────────────────────────────────────
+if "submit_info" in st.session_state:
+    info = st.session_state.submit_info
+    st.success("Dokumentasi berhasil dikirim dan tersimpan.")
+    st.markdown(f"""
+**Ringkasan pengiriman:**
+
+| | |
+|---|---|
+| ID Unik | `{info['unique_id']}` |
+| Outlet | {info['outlet']} ({info['kode']}) |
+| Eksekutor | {info['promotor']} |
+| Waktu Kirim | {info['waktu']} |
+
+Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan input baru.
+""")
+    if st.button("Input Dokumentasi Baru", type="primary"):
+        del st.session_state["submit_info"]
+        st.rerun()
+    st.stop()
 
 # Session state init
 for key, default in [
@@ -156,7 +186,7 @@ for key, default in [
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 1 — Identitas & Detail Program
 # ══════════════════════════════════════════════════════════════════════════════
-with st.expander("① Identitas & Detail Program", expanded=(st.session_state.step == 1)):
+with st.expander("1. Identitas & Detail Program", expanded=(st.session_state.step == 1)):
     promotors = load_promotors()
 
     col1, col2 = st.columns(2)
@@ -194,10 +224,16 @@ with st.expander("① Identitas & Detail Program", expanded=(st.session_state.st
 # STEP 2 — Pilih Customer, Rayon & Zona
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.step >= 2:
-    with st.expander("② Pilih Customer, Rayon & Zona", expanded=(st.session_state.step == 2)):
+    with st.expander("2. Pilih Customer, Rayon & Zona", expanded=(st.session_state.step == 2)):
         # Rayon & Zona dari config
         rayon_list = load_rayon()
         zona_list  = load_zona()
+
+        if not rayon_list or not zona_list:
+            with st.expander("Debug info Config sheet", expanded=True):
+                st.write(f"Config_Rayon: {len(rayon_list)} item ditemukan: {rayon_list}")
+                st.write(f"Config_Zona: {len(zona_list)} item ditemukan: {zona_list}")
+                st.caption("Pastikan nama tab di sheet persis: Config_Rayon dan Config_Zona (case-sensitive), dan data dimulai dari baris 2.")
 
         col_r, col_z = st.columns(2)
         with col_r:
@@ -211,7 +247,7 @@ if st.session_state.step >= 2:
         df_cust = load_customers()
 
         if df_cust.empty:
-            st.error("❌ Data customer tidak ditemukan.")
+            st.error("Data customer tidak ditemukan.")
             st.stop()
 
         cols = df_cust.columns.tolist()
@@ -221,7 +257,7 @@ if st.session_state.step >= 2:
 
         search_mode = st.radio("Cari berdasarkan:", ["Nama Toko", "Kode Customer"], horizontal=True, key="search_mode")
         search_col  = name_col if search_mode == "Nama Toko" else code_col
-        search      = st.text_input("🔍 Ketik untuk mencari", key="search_input")
+        search      = st.text_input("Ketik untuk mencari", key="search_input")
 
         mask    = df_cust[search_col].astype(str).str.contains(search, case=False, na=False) if search else pd.Series([True] * len(df_cust))
         results = df_cust[mask]
@@ -258,7 +294,7 @@ if st.session_state.step >= 2:
 # STEP 3 — Upload Foto, Lokasi GPS & Submit
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.step >= 3:
-    with st.expander("③ Upload Foto, Lokasi & Submit", expanded=(st.session_state.step == 3)):
+    with st.expander("3. Upload Foto, Lokasi & Submit", expanded=(st.session_state.step == 3)):
         cust = st.session_state.selected_customer
 
         if cust:
@@ -286,15 +322,16 @@ if st.session_state.step >= 3:
         st.divider()
 
         # ── GPS ───────────────────────────────────────────────────────────────
-        st.subheader("📍 Lokasi GPS")
+        st.subheader("Lokasi GPS")
         st.components.v1.html(GPS_JS, height=90)
 
         # Input tersembunyi — user bisa paste manual jika GPS gagal
         gps_input = st.text_input(
-            "Koordinat (lat,lng) — terisi otomatis setelah klik tombol GPS di atas",
+            "koordinat_gps",
             value=st.session_state.gps_coords,
             key="gps_manual",
-            placeholder="Contoh: -6.595038, 106.816635",
+            placeholder="Klik tombol di atas untuk mengisi otomatis",
+            label_visibility="collapsed",
         )
         if gps_input:
             st.session_state.gps_coords = gps_input
@@ -302,19 +339,18 @@ if st.session_state.step >= 3:
         st.divider()
 
         # ── Foto ──────────────────────────────────────────────────────────────
-        st.subheader("📸 Upload Foto")
-        foto_ktp      = st.file_uploader("🪪 Foto KTP Pemilik *",          type=["jpg","jpeg","png"], key="foto_ktp")
-        foto_sunblind = st.file_uploader("🪟 Foto Sunblind *",             type=["jpg","jpeg","png"], key="foto_sunblind")
-        foto_display  = st.file_uploader("🖼️ Foto Display (opsional)",      type=["jpg","jpeg","png"], key="foto_display")
-        foto_kompens  = st.file_uploader("💰 Foto Bukti Kompensasi *",      type=["jpg","jpeg","png"], key="foto_kompens")
+        st.subheader("Upload Foto")
+        foto_ktp      = st.file_uploader("Foto KTP Pemilik *",        type=["jpg","jpeg","png"], key="foto_ktp")
+        foto_sunblind = st.file_uploader("Foto Sunblind *",           type=["jpg","jpeg","png"], key="foto_sunblind")
+        foto_display  = st.file_uploader("Foto Display (opsional)",   type=["jpg","jpeg","png"], key="foto_display")
+        foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",   type=["jpg","jpeg","png"], key="foto_kompens")
 
         st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
 
-        jumlah  = st.number_input("Jumlah Kompensasi (Rp)", min_value=0, step=1000, key="jumlah_input")
         catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
 
         # ── Submit ────────────────────────────────────────────────────────────
-        if st.button("✅ Submit Dokumentasi", key="btn_submit", type="primary"):
+        if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
             errors = []
             if not foto_ktp:      errors.append("Foto KTP wajib diupload")
             if not foto_sunblind: errors.append("Foto Sunblind wajib diupload")
@@ -323,9 +359,9 @@ if st.session_state.step >= 3:
 
             if errors:
                 for e in errors:
-                    st.error(f"❌ {e}")
+                    st.error(e)
             else:
-                with st.spinner("Mengupload foto & menyimpan data..."):
+                with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
                     ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     uid = str(uuid.uuid4())[:8]
                     promotor_name = st.session_state.get("promotor_sel", "unknown")
@@ -338,7 +374,7 @@ if st.session_state.step >= 3:
                             fname = f"{ts}_{kode}_{promotor_name}_{label}_{uid}.jpg"
                             return upload_to_drive(compress_image(file), fname)
                         except Exception as e:
-                            st.error(f"❌ Gagal upload {label}: {e}")
+                            st.error(f"Gagal upload {label}: {e}")
                             raise
 
                     url_ktp      = safe_upload(foto_ktp,      "ktp")
@@ -346,37 +382,41 @@ if st.session_state.step >= 3:
                     url_display  = safe_upload(foto_display,  "display")
                     url_kompens  = safe_upload(foto_kompens,  "kompensasi")
 
-                    # Unique ID
                     unique_id = f"{ts}_{uid}"
+                    submit_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                     row = [
-                        unique_id,                                                         # Unique Id
-                        str(st.session_state.get("tgl_sel", datetime.date.today())),      # Date
-                        promotor_name,                                                      # Eksekutor
-                        st.session_state.get("program_sel", ""),                           # Program Investment
-                        st.session_state.get("jenis_sel", ""),                             # Jenis Investment
-                        st.session_state.get("brand_sel", ""),                             # Brand
-                        st.session_state.get("activity_sel", ""),                          # Activity
-                        st.session_state.get("rayon_sel", ""),                             # Rayon
-                        st.session_state.get("zona_sel", ""),                              # Zona
-                        cust.get(name_col, ""),                                            # Nama Outlet
-                        kode,                                                               # Kode Customer
-                        url_sunblind,                                                       # Foto Sunblind
-                        url_display,                                                        # Foto Display
-                        url_kompens,                                                        # Foto Kompensasi
-                        url_ktp,                                                            # Foto KTP
-                        st.session_state.gps_coords,                                       # Lokasi (LatLong)
-                        jumlah,                                                             # Jumlah Kompensasi
-                        catatan,                                                            # Catatan
-                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),            # Timestamp submit
+                        unique_id,
+                        str(st.session_state.get("tgl_sel", datetime.date.today())),
+                        promotor_name,
+                        st.session_state.get("program_sel", ""),
+                        st.session_state.get("jenis_sel", ""),
+                        st.session_state.get("brand_sel", ""),
+                        st.session_state.get("activity_sel", ""),
+                        st.session_state.get("rayon_sel", ""),
+                        st.session_state.get("zona_sel", ""),
+                        cust.get(name_col, ""),
+                        kode,
+                        url_sunblind,
+                        url_display,
+                        url_kompens,
+                        url_ktp,
+                        st.session_state.gps_coords,
+                        catatan,
+                        submit_time,
                     ]
                     append_submission(row)
+                    st.session_state.submit_info = {
+                        "unique_id": unique_id,
+                        "outlet": cust.get(name_col, "-"),
+                        "kode": kode,
+                        "promotor": promotor_name,
+                        "waktu": submit_time,
+                    }
 
-                st.success("✅ Dokumentasi berhasil disimpan!")
-                st.balloons()
-
-                # Reset session
+                # Reset session lalu tampilkan halaman konfirmasi
                 for k in ["step", "selected_customer", "gps_coords"]:
-                    del st.session_state[k]
+                    if k in st.session_state:
+                        del st.session_state[k]
                 st.cache_data.clear()
                 st.rerun()
