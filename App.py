@@ -268,13 +268,13 @@ if st.session_state.step >= 2:
         st.divider()
 
         # ── Customer search ──────────────────────────────────────────────────
-        df_cust = load_customers()
+        df_cust_all = load_customers()
 
-        if df_cust.empty:
+        if df_cust_all.empty:
             st.error("Data customer tidak ditemukan.")
             st.stop()
 
-        cols = df_cust.columns.tolist()
+        cols = df_cust_all.columns.tolist()
         code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
         name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
         addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
@@ -282,6 +282,19 @@ if st.session_state.step >= 2:
         # Deteksi kolom SALES GROUP (Rayon) dan SALES DISTRICT (Zona) dari sheet customer
         sales_group_col    = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
         sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
+
+        # Deteksi kolom STATUS (kolom K)
+        status_col = next((c for c in cols if c.lower() == "status"), None)
+
+        # ── Filter: mode Otomatis hanya tampilkan toko Aktif ─────────────────
+        if mode_otomatis and status_col:
+            df_cust = df_cust_all[df_cust_all[status_col].str.strip().str.lower() == "aktif"].copy()
+            n_total  = len(df_cust_all)
+            n_aktif  = len(df_cust)
+            st.caption(f"Menampilkan **{n_aktif:,} toko aktif** dari {n_total:,} total data")
+        else:
+            df_cust = df_cust_all.copy()
+            st.caption(f"Ketik nama toko atau kode customer untuk mencari ({len(df_cust):,} data)")
 
         # Buat label unik per baris: "NAMA TOKO (KODE) — ALAMAT"
         def make_label(r):
@@ -291,8 +304,6 @@ if st.session_state.step >= 2:
             return label
 
         df_cust["_label"] = df_cust.apply(make_label, axis=1)
-
-        st.caption(f"Ketik nama toko atau kode customer untuk mencari ({len(df_cust):,} data)")
 
         # Selectbox tunggal — Streamlit sudah support type-to-search native
         chosen_label = st.selectbox(
