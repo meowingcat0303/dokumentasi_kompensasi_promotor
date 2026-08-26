@@ -57,7 +57,6 @@ def load_config_list(tab_name: str) -> list:
         rows = ws.get_all_values()
         if len(rows) < 2:
             return []
-        # Kolom pertama, skip baris header (baris 0), ambil semua nilai non-kosong
         return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
     except Exception as e:
         st.warning(f"Gagal load tab '{tab_name}': {e}")
@@ -128,7 +127,6 @@ function getLocation() {
             var acc = Math.round(pos.coords.accuracy);
             var coords = lat + ', ' + lng;
             statusEl.innerText = 'Lokasi ditemukan: ' + coords + ' (akurasi +/- ' + acc + ' m)';
-            // Cari input koordinat via aria-label (Streamlit set aria-label dari label widget)
             var target = window.parent.document.querySelector('input[aria-label="koordinat_gps"]');
             if (target) {
                 var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
@@ -181,6 +179,7 @@ for key, default in [
     ("step", 1),
     ("selected_customer", None),
     ("gps_coords", ""),
+    ("rayon_zona_mode", "Otomatis (dari data customer)"),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -227,25 +226,48 @@ with st.expander("1. Identitas & Detail Program", expanded=(st.session_state.ste
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.step >= 2:
     with st.expander("2. Pilih Customer, Rayon & Zona", expanded=(st.session_state.step == 2)):
-        # Rayon & Zona dari config
-        rayon_list = load_rayon()
-        zona_list  = load_zona()
 
-        if not rayon_list or not zona_list:
-            with st.expander("Debug info Config sheet", expanded=True):
-                st.write(f"Config_Rayon: {len(rayon_list)} item ditemukan: {rayon_list}")
-                st.write(f"Config_Zona: {len(zona_list)} item ditemukan: {zona_list}")
-                st.caption("Pastikan nama tab di sheet persis: Config_Rayon dan Config_Zona (case-sensitive), dan data dimulai dari baris 2.")
+        # ── Mode selector ────────────────────────────────────────────────────
+        st.radio(
+            "Mode Rayon & Zona:",
+            ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
+            key="rayon_zona_mode",
+            horizontal=True,
+            help="Otomatis: Rayon & Zona diisi otomatis sesuai data customer yang dipilih.\nManual: Pilih Rayon & Zona secara mandiri dari dropdown.",
+        )
+        mode_otomatis = st.session_state.rayon_zona_mode == "Otomatis (dari data customer)"
 
-        col_r, col_z = st.columns(2)
-        with col_r:
-            rayon = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
-        with col_z:
-            zona = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
+        # ── Rayon & Zona (hanya tampil di mode manual) ───────────────────────
+        if not mode_otomatis:
+            rayon_list = load_rayon()
+            zona_list  = load_zona()
+
+            if not rayon_list or not zona_list:
+                with st.expander("Debug info Config sheet", expanded=True):
+                    st.write(f"Config_Rayon: {len(rayon_list)} item ditemukan: {rayon_list}")
+                    st.write(f"Config_Zona: {len(zona_list)} item ditemukan: {zona_list}")
+                    st.caption("Pastikan nama tab di sheet persis: Config_Rayon dan Config_Zona (case-sensitive), dan data dimulai dari baris 2.")
+
+            col_r, col_z = st.columns(2)
+            with col_r:
+                rayon = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
+            with col_z:
+                zona = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
+        else:
+            # Placeholder — akan diisi setelah customer dipilih
+            rayon = st.session_state.get("auto_rayon", "")
+            zona  = st.session_state.get("auto_zona", "")
+
+            if rayon or zona:
+                col_r, col_z = st.columns(2)
+                with col_r:
+                    st.info(f"**Rayon:** {rayon}" if rayon else "Rayon akan terisi otomatis")
+                with col_z:
+                    st.info(f"**Zona:** {zona}" if zona else "Zona akan terisi otomatis")
 
         st.divider()
 
-        # Customer search
+        # ── Customer search ──────────────────────────────────────────────────
         df_cust = load_customers()
 
         if df_cust.empty:
@@ -257,6 +279,10 @@ if st.session_state.step >= 2:
         name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
         addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
 
+        # Deteksi kolom SALES GROUP (Rayon) dan SALES DISTRICT (Zona) dari sheet customer
+        sales_group_col   = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
+        sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
+
         search_mode = st.radio("Cari berdasarkan:", ["Nama Toko", "Kode Customer"], horizontal=True, key="search_mode")
         search_col  = name_col if search_mode == "Nama Toko" else code_col
         search      = st.text_input("Ketik untuk mencari", key="search_input")
@@ -265,7 +291,7 @@ if st.session_state.step >= 2:
         results = df_cust[mask]
         st.caption(f"Menampilkan {min(len(results), 50)} dari {len(df_cust)} data")
 
-        display_cols = [c for c in [code_col, name_col, addr_col] if c]
+        display_cols = [c for c in [code_col, name_col, addr_col, sales_group_col, sales_district_col] if c]
         st.dataframe(results[display_cols].head(50), use_container_width=True, hide_index=True)
 
         if not results.empty:
@@ -277,16 +303,40 @@ if st.session_state.step >= 2:
             if chosen_label != "— Pilih —":
                 idx = option_labels.index(chosen_label) - 1
                 row = results.head(50).iloc[idx]
+
+                # Jika mode otomatis, ambil rayon & zona dari baris customer
+                if mode_otomatis:
+                    auto_rayon = str(row[sales_group_col]).strip() if sales_group_col and sales_group_col in row else ""
+                    auto_zona  = str(row[sales_district_col]).strip() if sales_district_col and sales_district_col in row else ""
+                    st.session_state.auto_rayon = auto_rayon
+                    st.session_state.auto_zona  = auto_zona
+                    rayon = auto_rayon
+                    zona  = auto_zona
+
+                    col_r, col_z = st.columns(2)
+                    with col_r:
+                        st.success(f"**Rayon (otomatis):** {rayon or '—'}")
+                    with col_z:
+                        st.success(f"**Zona (otomatis):** {zona or '—'}")
+
                 st.success(
                     f"**{row[name_col]}** ({row[code_col]})"
                     + (f" — {row[addr_col]}" if addr_col else "")
                 )
 
                 if st.button("Konfirmasi →", key="btn_step2"):
-                    if rayon == "— Pilih —" or zona == "— Pilih —":
+                    if not mode_otomatis and (rayon == "— Pilih —" or zona == "— Pilih —"):
                         st.warning("Pilih Rayon dan Zona terlebih dahulu.")
+                    elif mode_otomatis and (not rayon or not zona):
+                        st.warning(
+                            "Rayon atau Zona tidak ditemukan di data customer ini. "
+                            "Coba gunakan Mode Manual atau periksa data sheet customer."
+                        )
                     else:
                         st.session_state.selected_customer = row.to_dict()
+                        # Simpan rayon & zona yang akan dipakai ke session state
+                        st.session_state["confirmed_rayon"] = rayon
+                        st.session_state["confirmed_zona"]  = zona
                         st.session_state.step = 3
                         st.rerun()
         else:
@@ -298,6 +348,10 @@ if st.session_state.step >= 2:
 if st.session_state.step >= 3:
     with st.expander("3. Upload Foto, Lokasi & Submit", expanded=(st.session_state.step == 3)):
         cust = st.session_state.selected_customer
+
+        # Ambil rayon & zona yang sudah dikonfirmasi
+        confirmed_rayon = st.session_state.get("confirmed_rayon", "")
+        confirmed_zona  = st.session_state.get("confirmed_zona", "")
 
         if cust:
             cust_cols = list(cust.keys())
@@ -314,8 +368,8 @@ if st.session_state.step >= 3:
 | Jenis | {st.session_state.get('jenis_sel', '-')} |
 | Brand | {st.session_state.get('brand_sel', '-')} |
 | Activity | {st.session_state.get('activity_sel', '-')} |
-| Rayon | {st.session_state.get('rayon_sel', '-')} |
-| Zona | {st.session_state.get('zona_sel', '-')} |
+| Rayon | {confirmed_rayon or '-'} |
+| Zona | {confirmed_zona or '-'} |
 | Kode Customer | `{cust.get(code_col, '-')}` |
 | Nama Outlet | {cust.get(name_col, '-')} |
 | Alamat | {cust.get(addr_col, '-') if addr_col else '-'} |
@@ -327,7 +381,6 @@ if st.session_state.step >= 3:
         st.subheader("Lokasi GPS")
         st.components.v1.html(GPS_JS, height=90)
 
-        # Input tersembunyi — user bisa paste manual jika GPS gagal
         gps_input = st.text_input(
             "koordinat_gps",
             value=st.session_state.gps_coords,
@@ -395,8 +448,8 @@ if st.session_state.step >= 3:
                         st.session_state.get("jenis_sel", ""),
                         st.session_state.get("brand_sel", ""),
                         st.session_state.get("activity_sel", ""),
-                        st.session_state.get("rayon_sel", ""),
-                        st.session_state.get("zona_sel", ""),
+                        confirmed_rayon,
+                        confirmed_zona,
                         cust.get(name_col, ""),
                         kode,
                         url_sunblind,
@@ -416,8 +469,7 @@ if st.session_state.step >= 3:
                         "waktu": submit_time,
                     }
 
-                # Reset session lalu tampilkan halaman konfirmasi
-                for k in ["step", "selected_customer", "gps_coords"]:
+                for k in ["step", "selected_customer", "gps_coords", "auto_rayon", "auto_zona", "confirmed_rayon", "confirmed_zona"]:
                     if k in st.session_state:
                         del st.session_state[k]
                 st.cache_data.clear()
