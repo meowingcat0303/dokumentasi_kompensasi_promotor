@@ -280,36 +280,36 @@ if st.session_state.step >= 2:
         addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
 
         # Deteksi kolom SALES GROUP (Rayon) dan SALES DISTRICT (Zona) dari sheet customer
-        sales_group_col   = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
+        sales_group_col    = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
         sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
 
-        search_mode = st.radio("Cari berdasarkan:", ["Nama Toko", "Kode Customer"], horizontal=True, key="search_mode")
-        search_col  = name_col if search_mode == "Nama Toko" else code_col
-        search      = st.text_input("Ketik untuk mencari", key="search_input")
+        # Buat label unik per baris: "NAMA TOKO (KODE) — ALAMAT"
+        def make_label(r):
+            label = f"{r[name_col]} ({r[code_col]})"
+            if addr_col:
+                label += f" — {str(r[addr_col])[:40]}"
+            return label
 
-        mask    = df_cust[search_col].astype(str).str.contains(search, case=False, na=False) if search else pd.Series([True] * len(df_cust))
-        results = df_cust[mask]
-        st.caption(f"Menampilkan {min(len(results), 50)} dari {len(df_cust)} data")
+        df_cust["_label"] = df_cust.apply(make_label, axis=1)
 
-        display_cols = [c for c in [code_col, name_col, addr_col, sales_group_col, sales_district_col] if c]
-        st.dataframe(results[display_cols].head(50), use_container_width=True, hide_index=True)
+        st.caption(f"Ketik nama toko atau kode customer untuk mencari ({len(df_cust):,} data)")
 
-        if not results.empty:
-            def make_label(r):
-                return f"{r[name_col]} ({r[code_col]})"
-            option_labels = ["— Pilih —"] + [make_label(r) for _, r in results.head(50).iterrows()]
-            chosen_label  = st.selectbox("Pilih Customer", option_labels, key="cust_sel")
+        # Selectbox tunggal — Streamlit sudah support type-to-search native
+        chosen_label = st.selectbox(
+            "Cari & Pilih Customer",
+            options=["— Pilih —"] + df_cust["_label"].tolist(),
+            key="cust_sel",
+        )
 
-            if chosen_label != "— Pilih —":
-                idx = option_labels.index(chosen_label) - 1
-                row = results.head(50).iloc[idx]
+        if chosen_label != "— Pilih —":
+            match = df_cust[df_cust["_label"] == chosen_label]
+            if not match.empty:
+                row = match.iloc[0]
 
                 # Jika mode otomatis, ambil rayon & zona dari baris customer
                 if mode_otomatis:
-                    auto_rayon = str(row[sales_group_col]).strip() if sales_group_col and sales_group_col in row else ""
-                    auto_zona  = str(row[sales_district_col]).strip() if sales_district_col and sales_district_col in row else ""
-                    st.session_state.auto_rayon = auto_rayon
-                    st.session_state.auto_zona  = auto_zona
+                    auto_rayon = str(row[sales_group_col]).strip() if sales_group_col else ""
+                    auto_zona  = str(row[sales_district_col]).strip() if sales_district_col else ""
                     rayon = auto_rayon
                     zona  = auto_zona
 
@@ -334,13 +334,10 @@ if st.session_state.step >= 2:
                         )
                     else:
                         st.session_state.selected_customer = row.to_dict()
-                        # Simpan rayon & zona yang akan dipakai ke session state
                         st.session_state["confirmed_rayon"] = rayon
                         st.session_state["confirmed_zona"]  = zona
                         st.session_state.step = 3
                         st.rerun()
-        else:
-            st.warning("Tidak ada hasil. Coba kata kunci lain.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 3 — Upload Foto, Lokasi GPS & Submit
