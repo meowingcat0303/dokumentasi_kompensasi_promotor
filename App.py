@@ -29,7 +29,7 @@ def get_credentials():
     info = json.loads(st.secrets["gcp_json"])
     return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-@st.cache_resource
+@st.cache_resource(ttl=2700)  # Refresh setiap 45 menit, sebelum token 1 jam expire
 def get_gspread():
     return gspread.authorize(get_credentials())
 
@@ -90,9 +90,19 @@ def load_config_list(tab_name: str) -> list:
         if len(rows) < 2:
             return []
         return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
-    except Exception as e:
-        st.warning(f"Gagal load tab '{tab_name}': {e}")
-        return []
+    except Exception:
+        # Token mungkin baru expire — clear cache resource dan retry sekali
+        get_gspread.clear()
+        try:
+            gc = get_gspread()
+            ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet(tab_name)
+            rows = ws.get_all_values()
+            if len(rows) < 2:
+                return []
+            return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
+        except Exception as e:
+            st.warning(f"Gagal load tab '{tab_name}': {e}")
+            return []
 
 @st.cache_data(ttl=120)
 def load_all_config():
