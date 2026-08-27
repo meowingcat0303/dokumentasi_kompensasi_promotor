@@ -12,9 +12,7 @@ import uuid
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 
 # ── Config ──────────────────────────────────────────────────────────────────
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CUSTOMER_SHEET_ID   = "113E5fKvZ0wWloSbQ9IQo8QiCOz5C3zlJr28012PbXz4"
 SUBMISSION_SHEET_ID = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"
 IMAGE_MAX_PX  = 1920
@@ -43,13 +41,47 @@ def _sheet_to_df(ws) -> pd.DataFrame:
     headers = [str(h).strip() for h in rows[0]]
     return pd.DataFrame(rows[1:], columns=headers)
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def load_customers():
     gc = get_gspread()
     ws = gc.open_by_key(CUSTOMER_SHEET_ID).sheet1
-    return _sheet_to_df(ws)
+    df = _sheet_to_df(ws)
+    # Pre-compute column indices once
+    cols = df.columns.tolist()
+    code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
+    name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
+    addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
+    sales_group_col    = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
+    sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
+    status_col = next((c for c in cols if c.lower() == "status"), None)
 
-@st.cache_data(ttl=60)
+    # Pre-filter aktif & build labels here (inside cache = runs once)
+    if status_col:
+        df_aktif = df[df[status_col].str.strip().str.lower() == "aktif"].copy()
+    else:
+        df_aktif = df.copy()
+
+    def make_label(r):
+        label = f"{r[name_col]} ({r[code_col]})"
+        if addr_col:
+            label += f" — {str(r[addr_col])[:40]}"
+        return label
+
+    df_aktif["_label"] = df_aktif.apply(make_label, axis=1)
+
+    meta = {
+        "code_col": code_col,
+        "name_col": name_col,
+        "addr_col": addr_col,
+        "sales_group_col": sales_group_col,
+        "sales_district_col": sales_district_col,
+        "status_col": status_col,
+        "n_total": len(df),
+        "n_aktif": len(df_aktif),
+    }
+    return df_aktif, meta
+
+@st.cache_data(ttl=120)
 def load_config_list(tab_name: str) -> list:
     try:
         gc = get_gspread()
@@ -62,17 +94,13 @@ def load_config_list(tab_name: str) -> list:
         st.warning(f"Gagal load tab '{tab_name}': {e}")
         return []
 
-@st.cache_data(ttl=60)
-def load_promotors():
-    return load_config_list("Config_NamaPromotor")
-
-@st.cache_data(ttl=60)
-def load_rayon():
-    return load_config_list("Config_Rayon")
-
-@st.cache_data(ttl=60)
-def load_zona():
-    return load_config_list("Config_Zona")
+@st.cache_data(ttl=120)
+def load_all_config():
+    """Load promotors, rayon, zona in one cached call."""
+    promotors = load_config_list("Config_NamaPromotor")
+    rayon     = load_config_list("Config_Rayon")
+    zona      = load_config_list("Config_Zona")
+    return promotors, rayon, zona
 
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
@@ -93,11 +121,7 @@ APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6
 def upload_to_drive(data: bytes, filename: str) -> str:
     import base64
     b64 = base64.b64encode(data).decode("utf-8")
-    resp = _requests.post(
-        APPS_SCRIPT_URL,
-        data={"image": b64, "filename": filename},
-        timeout=60,
-    )
+    resp = _requests.post(APPS_SCRIPT_URL, data={"image": b64, "filename": filename}, timeout=60)
     resp.raise_for_status()
     result = resp.json()
     if result.get("success"):
@@ -149,7 +173,9 @@ function getLocation() {
 <div id="gps-status" style="color:#444; font-size:13px; margin-top:6px;"></div>
 """
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# UI
+# ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Dokumentasi Investment Lapangan", layout="centered")
 st.title("Dokumentasi Investment Lapangan")
 
@@ -174,311 +200,201 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
         st.rerun()
     st.stop()
 
-# Session state init
-for key, default in [
-    ("step", 1),
-    ("selected_customer", None),
-    ("gps_coords", ""),
-    ("rayon_zona_mode", "Otomatis (dari data customer)"),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+# ── Load semua data di awal (paralel via cache) ───────────────────────────────
+with st.spinner("Memuat data..."):
+    promotors, rayon_list, zona_list = load_all_config()
+    df_cust, meta = load_customers()
+
+code_col           = meta["code_col"]
+name_col           = meta["name_col"]
+addr_col           = meta["addr_col"]
+sales_group_col    = meta["sales_group_col"]
+sales_district_col = meta["sales_district_col"]
+
+st.caption(f"Data customer: **{meta['n_aktif']:,} toko aktif** dari {meta['n_total']:,} total")
+
+st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — Identitas & Detail Program
+# FORM — satu deret, tanpa step
 # ══════════════════════════════════════════════════════════════════════════════
-with st.expander("1. Identitas & Detail Program", expanded=(st.session_state.step == 1)):
-    promotors = load_promotors()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
-    with col2:
-        tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
+# ── Bagian 1: Identitas & Program ─────────────────────────────────────────────
+st.subheader("Identitas & Detail Program")
 
-    col3, col4 = st.columns(2)
-    with col3:
-        program = st.selectbox("Program Investment", ["— Pilih —"] + PROGRAM_OPTIONS, key="program_sel")
-    with col4:
-        jenis = st.selectbox("Jenis Investment", ["— Pilih —"] + JENIS_OPTIONS, key="jenis_sel")
+col1, col2 = st.columns(2)
+with col1:
+    promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
+with col2:
+    tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
 
-    col5, col6 = st.columns(2)
-    with col5:
-        brand = st.selectbox("Brand", ["— Pilih —"] + BRAND_OPTIONS, key="brand_sel")
-    with col6:
-        activity = st.selectbox("Activity", ["— Pilih —"] + ACTIVITY_OPTIONS, key="activity_sel")
+col3, col4 = st.columns(2)
+with col3:
+    program = st.selectbox("Program Investment", ["— Pilih —"] + PROGRAM_OPTIONS, key="program_sel")
+with col4:
+    jenis = st.selectbox("Jenis Investment", ["— Pilih —"] + JENIS_OPTIONS, key="jenis_sel")
 
-    if st.button("Lanjut →", key="btn_step1"):
-        missing = [
-            f for f, v in [
-                ("Eksekutor", promotor), ("Program Investment", program),
-                ("Jenis Investment", jenis), ("Brand", brand), ("Activity", activity),
-            ] if v == "— Pilih —"
-        ]
-        if missing:
-            st.warning(f"Lengkapi dahulu: {', '.join(missing)}")
-        else:
-            st.session_state.step = 2
-            st.rerun()
+col5, col6 = st.columns(2)
+with col5:
+    brand = st.selectbox("Brand", ["— Pilih —"] + BRAND_OPTIONS, key="brand_sel")
+with col6:
+    activity = st.selectbox("Activity", ["— Pilih —"] + ACTIVITY_OPTIONS, key="activity_sel")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Pilih Customer, Rayon & Zona
-# ══════════════════════════════════════════════════════════════════════════════
-if st.session_state.step >= 2:
-    with st.expander("2. Pilih Customer, Rayon & Zona", expanded=(st.session_state.step == 2)):
+st.divider()
 
-        # ── Mode selector ────────────────────────────────────────────────────
-        st.radio(
-            "Mode Rayon & Zona:",
-            ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
-            key="rayon_zona_mode",
-            horizontal=True,
-            help="Otomatis: Rayon & Zona diisi otomatis sesuai data customer yang dipilih.\nManual: Pilih Rayon & Zona secara mandiri dari dropdown.",
-        )
-        mode_otomatis = st.session_state.rayon_zona_mode == "Otomatis (dari data customer)"
+# ── Bagian 2: Customer, Rayon & Zona ─────────────────────────────────────────
+st.subheader("Customer, Rayon & Zona")
 
-        # ── Rayon & Zona (hanya tampil di mode manual) ───────────────────────
-        if not mode_otomatis:
-            rayon_list = load_rayon()
-            zona_list  = load_zona()
+st.radio(
+    "Mode Rayon & Zona:",
+    ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
+    key="rayon_zona_mode",
+    horizontal=True,
+)
+mode_otomatis = st.session_state.rayon_zona_mode == "Otomatis (dari data customer)"
 
-            if not rayon_list or not zona_list:
-                with st.expander("Debug info Config sheet", expanded=True):
-                    st.write(f"Config_Rayon: {len(rayon_list)} item ditemukan: {rayon_list}")
-                    st.write(f"Config_Zona: {len(zona_list)} item ditemukan: {zona_list}")
-                    st.caption("Pastikan nama tab di sheet persis: Config_Rayon dan Config_Zona (case-sensitive), dan data dimulai dari baris 2.")
+if not mode_otomatis:
+    col_r, col_z = st.columns(2)
+    with col_r:
+        rayon_sel = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
+    with col_z:
+        zona_sel = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
 
+if df_cust.empty:
+    st.error("Data customer tidak ditemukan.")
+    st.stop()
+
+chosen_label = st.selectbox(
+    "Cari & Pilih Customer",
+    options=["— Pilih —"] + df_cust["_label"].tolist(),
+    key="cust_sel",
+)
+
+selected_customer = None
+rayon_final = ""
+zona_final  = ""
+
+if chosen_label != "— Pilih —":
+    match = df_cust[df_cust["_label"] == chosen_label]
+    if not match.empty:
+        selected_customer = match.iloc[0].to_dict()
+
+        if mode_otomatis:
+            rayon_final = str(selected_customer[sales_group_col]).strip() if sales_group_col else ""
+            zona_final  = str(selected_customer[sales_district_col]).strip() if sales_district_col else ""
             col_r, col_z = st.columns(2)
             with col_r:
-                rayon = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
+                st.info(f"**Rayon:** {rayon_final or '—'}")
             with col_z:
-                zona = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
+                st.info(f"**Zona:** {zona_final or '—'}")
         else:
-            # Placeholder — akan diisi setelah customer dipilih
-            rayon = st.session_state.get("auto_rayon", "")
-            zona  = st.session_state.get("auto_zona", "")
+            rayon_final = rayon_sel if rayon_sel != "— Pilih —" else ""
+            zona_final  = zona_sel  if zona_sel  != "— Pilih —" else ""
 
-            if rayon or zona:
-                col_r, col_z = st.columns(2)
-                with col_r:
-                    st.info(f"**Rayon:** {rayon}" if rayon else "Rayon akan terisi otomatis")
-                with col_z:
-                    st.info(f"**Zona:** {zona}" if zona else "Zona akan terisi otomatis")
-
-        st.divider()
-
-        # ── Customer search ──────────────────────────────────────────────────
-        df_cust_all = load_customers()
-
-        if df_cust_all.empty:
-            st.error("Data customer tidak ditemukan.")
-            st.stop()
-
-        cols = df_cust_all.columns.tolist()
-        code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
-        name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
-        addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
-
-        # Deteksi kolom SALES GROUP (Rayon) dan SALES DISTRICT (Zona) dari sheet customer
-        sales_group_col    = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
-        sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
-
-        # Deteksi kolom STATUS (kolom K)
-        status_col = next((c for c in cols if c.lower() == "status"), None)
-
-        # ── Filter: mode Otomatis hanya tampilkan toko Aktif ─────────────────
-        if mode_otomatis and status_col:
-            df_cust = df_cust_all[df_cust_all[status_col].str.strip().str.lower() == "aktif"].copy()
-            n_total  = len(df_cust_all)
-            n_aktif  = len(df_cust)
-            st.caption(f"Menampilkan **{n_aktif:,} toko aktif** dari {n_total:,} total data")
-        else:
-            df_cust = df_cust_all.copy()
-            st.caption(f"Ketik nama toko atau kode customer untuk mencari ({len(df_cust):,} data)")
-
-        # Buat label unik per baris: "NAMA TOKO (KODE) — ALAMAT"
-        def make_label(r):
-            label = f"{r[name_col]} ({r[code_col]})"
-            if addr_col:
-                label += f" — {str(r[addr_col])[:40]}"
-            return label
-
-        df_cust["_label"] = df_cust.apply(make_label, axis=1)
-
-        # Selectbox tunggal — Streamlit sudah support type-to-search native
-        chosen_label = st.selectbox(
-            "Cari & Pilih Customer",
-            options=["— Pilih —"] + df_cust["_label"].tolist(),
-            key="cust_sel",
+        st.success(
+            f"**{selected_customer[name_col]}** ({selected_customer[code_col]})"
+            + (f" — {selected_customer[addr_col]}" if addr_col else "")
         )
 
-        if chosen_label != "— Pilih —":
-            match = df_cust[df_cust["_label"] == chosen_label]
-            if not match.empty:
-                row = match.iloc[0]
+st.divider()
 
-                # Jika mode otomatis, ambil rayon & zona dari baris customer
-                if mode_otomatis:
-                    auto_rayon = str(row[sales_group_col]).strip() if sales_group_col else ""
-                    auto_zona  = str(row[sales_district_col]).strip() if sales_district_col else ""
-                    rayon = auto_rayon
-                    zona  = auto_zona
+# ── Bagian 3: GPS ─────────────────────────────────────────────────────────────
+st.subheader("Lokasi GPS")
+st.components.v1.html(GPS_JS, height=90)
 
-                    col_r, col_z = st.columns(2)
-                    with col_r:
-                        st.success(f"**Rayon (otomatis):** {rayon or '—'}")
-                    with col_z:
-                        st.success(f"**Zona (otomatis):** {zona or '—'}")
+if "gps_coords" not in st.session_state:
+    st.session_state.gps_coords = ""
 
-                st.success(
-                    f"**{row[name_col]}** ({row[code_col]})"
-                    + (f" — {row[addr_col]}" if addr_col else "")
-                )
+gps_input = st.text_input(
+    "koordinat_gps",
+    value=st.session_state.gps_coords,
+    key="gps_manual",
+    placeholder="Klik tombol di atas untuk mengisi otomatis",
+    label_visibility="collapsed",
+)
+if gps_input:
+    st.session_state.gps_coords = gps_input
 
-                if st.button("Konfirmasi →", key="btn_step2"):
-                    if not mode_otomatis and (rayon == "— Pilih —" or zona == "— Pilih —"):
-                        st.warning("Pilih Rayon dan Zona terlebih dahulu.")
-                    elif mode_otomatis and (not rayon or not zona):
-                        st.warning(
-                            "Rayon atau Zona tidak ditemukan di data customer ini. "
-                            "Coba gunakan Mode Manual atau periksa data sheet customer."
-                        )
-                    else:
-                        st.session_state.selected_customer = row.to_dict()
-                        st.session_state["confirmed_rayon"] = rayon
-                        st.session_state["confirmed_zona"]  = zona
-                        st.session_state.step = 3
-                        st.rerun()
+st.divider()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Upload Foto, Lokasi GPS & Submit
-# ══════════════════════════════════════════════════════════════════════════════
-if st.session_state.step >= 3:
-    with st.expander("3. Upload Foto, Lokasi & Submit", expanded=(st.session_state.step == 3)):
-        cust = st.session_state.selected_customer
+# ── Bagian 4: Foto ────────────────────────────────────────────────────────────
+st.subheader("Upload Foto")
+foto_ktp      = st.file_uploader("Foto KTP Pemilik *",       type=["jpg","jpeg","png"], key="foto_ktp")
+foto_sunblind = st.file_uploader("Foto Sunblind *",          type=["jpg","jpeg","png"], key="foto_sunblind")
+foto_display  = st.file_uploader("Foto Display (opsional)",  type=["jpg","jpeg","png"], key="foto_display")
+foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",  type=["jpg","jpeg","png"], key="foto_kompens")
+st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
 
-        # Ambil rayon & zona yang sudah dikonfirmasi
-        confirmed_rayon = st.session_state.get("confirmed_rayon", "")
-        confirmed_zona  = st.session_state.get("confirmed_zona", "")
+catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
 
-        if cust:
-            cust_cols = list(cust.keys())
-            code_col = next((c for c in cust_cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cust_cols[0])
-            name_col = next((c for c in cust_cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cust_cols[0])
-            addr_col = next((c for c in cust_cols if "alamat" in c.lower() or "address" in c.lower()), None)
+st.divider()
 
-            st.markdown(f"""
-| Field | Value |
-|---|---|
-| Eksekutor | {st.session_state.get('promotor_sel', '-')} |
-| Tanggal | {st.session_state.get('tgl_sel', '-')} |
-| Program | {st.session_state.get('program_sel', '-')} |
-| Jenis | {st.session_state.get('jenis_sel', '-')} |
-| Brand | {st.session_state.get('brand_sel', '-')} |
-| Activity | {st.session_state.get('activity_sel', '-')} |
-| Rayon | {confirmed_rayon or '-'} |
-| Zona | {confirmed_zona or '-'} |
-| Kode Customer | `{cust.get(code_col, '-')}` |
-| Nama Outlet | {cust.get(name_col, '-')} |
-| Alamat | {cust.get(addr_col, '-') if addr_col else '-'} |
-""")
+# ── Submit ────────────────────────────────────────────────────────────────────
+if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
+    errors = []
+    if promotor  == "— Pilih —": errors.append("Eksekutor wajib dipilih")
+    if program   == "— Pilih —": errors.append("Program Investment wajib dipilih")
+    if jenis     == "— Pilih —": errors.append("Jenis Investment wajib dipilih")
+    if brand     == "— Pilih —": errors.append("Brand wajib dipilih")
+    if activity  == "— Pilih —": errors.append("Activity wajib dipilih")
+    if not selected_customer:    errors.append("Customer belum dipilih")
+    if not rayon_final:          errors.append("Rayon tidak ditemukan / belum dipilih")
+    if not zona_final:           errors.append("Zona tidak ditemukan / belum dipilih")
+    if not foto_ktp:             errors.append("Foto KTP wajib diupload")
+    if not foto_sunblind:        errors.append("Foto Sunblind wajib diupload")
+    if not foto_kompens:         errors.append("Foto Bukti Kompensasi wajib diupload")
 
-        st.divider()
+    if errors:
+        for e in errors:
+            st.error(e)
+    else:
+        with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
+            ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+            uid = str(uuid.uuid4())[:8]
+            kode = selected_customer.get(code_col, "unknown")
 
-        # ── GPS ───────────────────────────────────────────────────────────────
-        st.subheader("Lokasi GPS")
-        st.components.v1.html(GPS_JS, height=90)
+            def safe_upload(file, label):
+                if file is None:
+                    return ""
+                fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
+                return upload_to_drive(compress_image(file), fname)
 
-        gps_input = st.text_input(
-            "koordinat_gps",
-            value=st.session_state.gps_coords,
-            key="gps_manual",
-            placeholder="Klik tombol di atas untuk mengisi otomatis",
-            label_visibility="collapsed",
-        )
-        if gps_input:
-            st.session_state.gps_coords = gps_input
+            url_ktp      = safe_upload(foto_ktp,      "ktp")
+            url_sunblind = safe_upload(foto_sunblind, "sunblind")
+            url_display  = safe_upload(foto_display,  "display")
+            url_kompens  = safe_upload(foto_kompens,  "kompensasi")
 
-        st.divider()
+            unique_id   = f"{ts}_{uid}"
+            submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
 
-        # ── Foto ──────────────────────────────────────────────────────────────
-        st.subheader("Upload Foto")
-        foto_ktp      = st.file_uploader("Foto KTP Pemilik *",        type=["jpg","jpeg","png"], key="foto_ktp")
-        foto_sunblind = st.file_uploader("Foto Sunblind *",           type=["jpg","jpeg","png"], key="foto_sunblind")
-        foto_display  = st.file_uploader("Foto Display (opsional)",   type=["jpg","jpeg","png"], key="foto_display")
-        foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",   type=["jpg","jpeg","png"], key="foto_kompens")
-
-        st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
-
-        catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
-
-        # ── Submit ────────────────────────────────────────────────────────────
-        if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
-            errors = []
-            if not foto_ktp:      errors.append("Foto KTP wajib diupload")
-            if not foto_sunblind: errors.append("Foto Sunblind wajib diupload")
-            if not foto_kompens:  errors.append("Foto Bukti Kompensasi wajib diupload")
-            if not cust:          errors.append("Customer belum dipilih")
-
-            if errors:
-                for e in errors:
-                    st.error(e)
-            else:
-                with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
-                    ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
-                    uid = str(uuid.uuid4())[:8]
-                    promotor_name = st.session_state.get("promotor_sel", "unknown")
-                    kode = cust.get(code_col, "unknown")
-
-                    def safe_upload(file, label):
-                        if file is None:
-                            return ""
-                        try:
-                            fname = f"{ts}_{kode}_{promotor_name}_{label}_{uid}.jpg"
-                            return upload_to_drive(compress_image(file), fname)
-                        except Exception as e:
-                            st.error(f"Gagal upload {label}: {e}")
-                            raise
-
-                    url_ktp      = safe_upload(foto_ktp,      "ktp")
-                    url_sunblind = safe_upload(foto_sunblind, "sunblind")
-                    url_display  = safe_upload(foto_display,  "display")
-                    url_kompens  = safe_upload(foto_kompens,  "kompensasi")
-
-                    unique_id = f"{ts}_{uid}"
-                    submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
-
-                    row = [
-                        unique_id,
-                        str(st.session_state.get("tgl_sel", datetime.datetime.now(WIB).date())),
-                        promotor_name,
-                        st.session_state.get("program_sel", ""),
-                        st.session_state.get("jenis_sel", ""),
-                        st.session_state.get("brand_sel", ""),
-                        st.session_state.get("activity_sel", ""),
-                        confirmed_rayon,
-                        confirmed_zona,
-                        cust.get(name_col, ""),
-                        kode,
-                        url_sunblind,
-                        url_display,
-                        url_kompens,
-                        url_ktp,
-                        st.session_state.gps_coords,
-                        catatan,
-                        submit_time,
-                    ]
-                    append_submission(row)
-                    st.session_state.submit_info = {
-                        "unique_id": unique_id,
-                        "outlet": cust.get(name_col, "-"),
-                        "kode": kode,
-                        "promotor": promotor_name,
-                        "waktu": submit_time,
-                    }
-
-                for k in ["step", "selected_customer", "gps_coords", "auto_rayon", "auto_zona", "confirmed_rayon", "confirmed_zona"]:
-                    if k in st.session_state:
-                        del st.session_state[k]
-                st.cache_data.clear()
-                st.rerun()
+            row = [
+                unique_id,
+                str(tgl),
+                promotor,
+                program,
+                jenis,
+                brand,
+                activity,
+                rayon_final,
+                zona_final,
+                selected_customer.get(name_col, ""),
+                kode,
+                url_sunblind,
+                url_display,
+                url_kompens,
+                url_ktp,
+                st.session_state.gps_coords,
+                catatan,
+                submit_time,
+            ]
+            append_submission(row)
+            st.session_state.submit_info = {
+                "unique_id": unique_id,
+                "outlet": selected_customer.get(name_col, "-"),
+                "kode": kode,
+                "promotor": promotor,
+                "waktu": submit_time,
+            }
+            st.session_state.gps_coords = ""
+            st.cache_data.clear()
+            st.rerun()
