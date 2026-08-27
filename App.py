@@ -15,6 +15,16 @@ WIB = datetime.timezone(datetime.timedelta(hours=7))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CUSTOMER_SHEET_ID   = "113E5fKvZ0wWloSbQ9IQo8QiCOz5C3zlJr28012PbXz4"
 SUBMISSION_SHEET_ID = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"
+
+# GID tiap tab di SUBMISSION_SHEET (cek dari URL sheet saat tab aktif: ...#gid=XXXX)
+# sheet1 customer = gid 0 by default
+CUSTOMER_GID            = 0
+CONFIG_PROMOTOR_GID     = None   # diisi manual jika tahu GID-nya, fallback ke nama tab
+CONFIG_RAYON_GID        = None
+CONFIG_ZONA_GID         = None
+
+def _csv_url(sheet_id: str, gid: int = 0) -> str:
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 IMAGE_MAX_PX  = 1920
 IMAGE_QUALITY = 75
 
@@ -34,19 +44,22 @@ def get_gspread():
     return gspread.authorize(get_credentials())
 
 # ── Data loaders ─────────────────────────────────────────────────────────────
-def _sheet_to_df(ws) -> pd.DataFrame:
-    rows = ws.get_all_values()
-    if not rows:
+def _read_csv_url(url: str) -> pd.DataFrame:
+    """Baca Google Sheet via CSV export — jauh lebih cepat dari API, tanpa OAuth."""
+    try:
+        df = pd.read_csv(url, dtype=str).fillna("")
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+    except Exception as e:
+        st.error(f"Gagal membaca data dari Google Sheets: {e}\n\nPastikan sheet sudah di-share 'Anyone with link → Viewer'.")
         return pd.DataFrame()
-    headers = [str(h).strip() for h in rows[0]]
-    return pd.DataFrame(rows[1:], columns=headers)
 
 @st.cache_data(ttl=600)
 def load_customers():
-    gc = get_gspread()
-    ws = gc.open_by_key(CUSTOMER_SHEET_ID).sheet1
-    df = _sheet_to_df(ws)
-    # Pre-compute column indices once
+    url = _csv_url(CUSTOMER_SHEET_ID, CUSTOMER_GID)
+    df = _read_csv_url(url)
+    if df.empty:
+        return df, {}
     cols = df.columns.tolist()
     code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
     name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
@@ -81,22 +94,34 @@ def load_customers():
     }
     return df_aktif, meta
 
-@st.cache_data(ttl=120)
-def load_config_list(tab_name: str) -> list:
+@st.cache_data(ttl=300)
+def _get_sheet_gids(sheet_id: str) -> dict:
+    """Ambil mapping nama tab → GID via gspread (sekali, di-cache lama)."""
     try:
         gc = get_gspread()
-        ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet(tab_name)
-        rows = ws.get_all_values()
-        if len(rows) < 2:
-            return []
-        return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
-    except Exception as e:
-        st.warning(f"Gagal load tab '{tab_name}': {e}")
+        sh = gc.open_by_key(sheet_id)
+        return {ws.title: ws.id for ws in sh.worksheets()}
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=120)
+def load_config_list(tab_name: str) -> list:
+    """Baca config tab via CSV export. GID di-resolve otomatis."""
+    gids = _get_sheet_gids(SUBMISSION_SHEET_ID)
+    gid  = gids.get(tab_name)
+    if gid is None:
+        st.warning(f"Tab '{tab_name}' tidak ditemukan di sheet.")
         return []
+    url = _csv_url(SUBMISSION_SHEET_ID, gid)
+    df  = _read_csv_url(url)
+    if df.empty:
+        return []
+    first_col = df.iloc[:, 0]
+    return sorted([str(v).strip() for v in first_col if str(v).strip()])
 
 @st.cache_data(ttl=120)
 def load_all_config():
-    """Load promotors, rayon, zona in one cached call."""
+    """Load promotors, rayon, zona — GID lookup hanya 1x, data via CSV."""
     promotors = load_config_list("Config_NamaPromotor")
     rayon     = load_config_list("Config_Rayon")
     zona      = load_config_list("Config_Zona")
