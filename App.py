@@ -224,9 +224,9 @@ st.subheader("Identitas & Detail Program")
 
 col1, col2 = st.columns(2)
 with col1:
-    promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
-with col2:
     tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
+with col2:
+    promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
 
 col3, col4 = st.columns(2)
 with col3:
