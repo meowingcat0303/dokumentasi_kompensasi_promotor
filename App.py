@@ -11,7 +11,10 @@ import uuid
 
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── Password Admin ────────────────────────────────────────────────────────────
+ADMIN_PASSWORD = "220603"
+
+# ── Config ────────────────────────────────────────────────────────────────────
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CUSTOMER_SHEET_ID   = "113E5fKvZ0wWloSbQ9IQo8QiCOz5C3zlJr28012PbXz4"
 SUBMISSION_SHEET_ID = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"
@@ -23,17 +26,20 @@ JENIS_OPTIONS    = ["SNT", "Thinplate", "PNT 3D", "Shopsign"]
 BRAND_OPTIONS    = ["EVO", "ARJA", "Wismilak Kretek"]
 ACTIVITY_OPTIONS = ["Termin 1", "Termin 2"]
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
+TERMIN_MONTHS = 6          # jarak antar termin / durasi kontrak setelah termin 2
+REMINDER_DAYS = 21         # highlight kuning jika sisa <= hari ini
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_credentials():
     info = json.loads(st.secrets["gcp_json"])
     return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-@st.cache_resource(ttl=2700)  # Refresh setiap 45 menit, sebelum token 1 jam expire
+@st.cache_resource(ttl=2700)
 def get_gspread():
     return gspread.authorize(get_credentials())
 
-# ── Data loaders ─────────────────────────────────────────────────────────────
+# ── Data loaders ──────────────────────────────────────────────────────────────
 def _sheet_to_df(ws) -> pd.DataFrame:
     rows = ws.get_all_values()
     if not rows:
@@ -46,7 +52,6 @@ def load_customers():
     gc = get_gspread()
     ws = gc.open_by_key(CUSTOMER_SHEET_ID).sheet1
     df = _sheet_to_df(ws)
-    # Pre-compute column indices once
     cols = df.columns.tolist()
     code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
     name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
@@ -55,7 +60,6 @@ def load_customers():
     sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
     status_col = next((c for c in cols if c.lower() == "status"), None)
 
-    # Pre-filter aktif & build labels here (inside cache = runs once)
     if status_col:
         df_aktif = df[df[status_col].str.strip().str.lower() == "aktif"].copy()
     else:
@@ -91,7 +95,6 @@ def load_config_list(tab_name: str) -> list:
             return []
         return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
     except Exception:
-        # Token mungkin baru expire — clear cache resource dan retry sekali
         get_gspread.clear()
         try:
             gc = get_gspread()
@@ -106,11 +109,20 @@ def load_config_list(tab_name: str) -> list:
 
 @st.cache_data(ttl=120)
 def load_all_config():
-    """Load promotors, rayon, zona in one cached call."""
     promotors = load_config_list("Config_NamaPromotor")
     rayon     = load_config_list("Config_Rayon")
     zona      = load_config_list("Config_Zona")
     return promotors, rayon, zona
+
+@st.cache_data(ttl=60)
+def load_submissions() -> pd.DataFrame:
+    try:
+        gc = get_gspread()
+        ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
+        return _sheet_to_df(ws)
+    except Exception as e:
+        st.warning(f"Gagal memuat submission: {e}")
+        return pd.DataFrame()
 
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
@@ -125,7 +137,7 @@ def compress_image(uploaded_file) -> bytes:
     img.save(buf, format="JPEG", quality=IMAGE_QUALITY, optimize=True)
     return buf.getvalue()
 
-# ── Drive upload via Apps Script ──────────────────────────────────────────────
+# ── Drive upload ──────────────────────────────────────────────────────────────
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6BrA7TdHiFVfgsPL2b_xGDkWTqBD30tlGWpCXvQ8F2IXIjO/exec"
 
 def upload_to_drive(data: bytes, filename: str) -> str:
@@ -144,7 +156,43 @@ def append_submission(row: list):
     ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
     ws.append_row(row, value_input_option="USER_ENTERED")
 
-# ── GPS helper ────────────────────────────────────────────────────────────────
+# ── Termin / deadline logic ───────────────────────────────────────────────────
+def add_months(d: datetime.date, months: int) -> datetime.date:
+    month = d.month - 1 + months
+    year  = d.year + month // 12
+    month = month % 12 + 1
+    import calendar
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return datetime.date(year, month, day)
+
+def compute_deadline(date_str: str, activity: str) -> datetime.date | None:
+    try:
+        d = datetime.date.fromisoformat(str(date_str).strip())
+        return add_months(d, TERMIN_MONTHS)
+    except Exception:
+        return None
+
+def countdown_label(deadline: datetime.date, today: datetime.date) -> tuple[str, bool]:
+    """Returns (label, is_warning)."""
+    delta = (deadline - today).days
+    if delta < 0:
+        return f"Lewat {abs(delta)} hari", True
+    elif delta == 0:
+        return "Hari ini!", True
+    elif delta <= REMINDER_DAYS:
+        months_left = delta // 30
+        days_left   = delta % 30
+        if months_left > 0:
+            return f"{months_left} bln {days_left} hr lagi", True
+        return f"{delta} hari lagi", True
+    else:
+        months_left = delta // 30
+        days_left   = delta % 30
+        if months_left > 0:
+            return f"{months_left} bln {days_left} hr lagi", False
+        return f"{delta} hari lagi", False
+
+# ── GPS JS ────────────────────────────────────────────────────────────────────
 GPS_JS = """
 <script>
 function getLocation() {
@@ -184,16 +232,27 @@ function getLocation() {
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI
+# PAGE CONFIG & NAVIGATION
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Dokumentasi Investment Lapangan", layout="centered")
-st.title("Dokumentasi Investment Lapangan")
 
-# ── Halaman konfirmasi setelah submit ─────────────────────────────────────────
-if "submit_info" in st.session_state:
-    info = st.session_state.submit_info
-    st.success("Dokumentasi berhasil dikirim dan tersimpan.")
-    st.markdown(f"""
+page = st.sidebar.radio(
+    "Menu",
+    ["Input Dokumentasi", "Monitoring (Admin)"],
+    key="nav_page",
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 1 — INPUT DOKUMENTASI
+# ══════════════════════════════════════════════════════════════════════════════
+if page == "Input Dokumentasi":
+
+    st.title("Dokumentasi Investment Lapangan")
+
+    if "submit_info" in st.session_state:
+        info = st.session_state.submit_info
+        st.success("Dokumentasi berhasil dikirim dan tersimpan.")
+        st.markdown(f"""
 **Ringkasan pengiriman:**
 
 | | |
@@ -205,206 +264,380 @@ if "submit_info" in st.session_state:
 
 Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan input baru.
 """)
-    if st.button("Input Dokumentasi Baru", type="primary"):
-        del st.session_state["submit_info"]
-        st.rerun()
-    st.stop()
-
-# ── Load semua data di awal (paralel via cache) ───────────────────────────────
-with st.spinner("Memuat data..."):
-    promotors, rayon_list, zona_list = load_all_config()
-    df_cust, meta = load_customers()
-
-code_col           = meta["code_col"]
-name_col           = meta["name_col"]
-addr_col           = meta["addr_col"]
-sales_group_col    = meta["sales_group_col"]
-sales_district_col = meta["sales_district_col"]
-
-st.caption(f"Data customer: **{meta['n_aktif']:,} toko aktif** dari {meta['n_total']:,} total")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FORM — satu deret, tanpa step
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Bagian 1: Identitas & Program ─────────────────────────────────────────────
-st.subheader("Identitas & Detail Program")
-
-col1, col2 = st.columns(2)
-with col1:
-    tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
-with col2:
-    promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
-
-col3, col4 = st.columns(2)
-with col3:
-    program = st.selectbox("Program Investment", ["— Pilih —"] + PROGRAM_OPTIONS, key="program_sel")
-with col4:
-    jenis = st.selectbox("Jenis Investment", ["— Pilih —"] + JENIS_OPTIONS, key="jenis_sel")
-
-col5, col6 = st.columns(2)
-with col5:
-    brand = st.selectbox("Brand", ["— Pilih —"] + BRAND_OPTIONS, key="brand_sel")
-with col6:
-    activity = st.selectbox("Activity", ["— Pilih —"] + ACTIVITY_OPTIONS, key="activity_sel")
-
-st.divider()
-
-# ── Bagian 2: Customer, Rayon & Zona ─────────────────────────────────────────
-st.subheader("Customer, Rayon & Zona")
-
-st.radio(
-    "Mode Rayon & Zona:",
-    ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
-    key="rayon_zona_mode",
-    horizontal=True,
-)
-mode_otomatis = st.session_state.rayon_zona_mode == "Otomatis (dari data customer)"
-
-if not mode_otomatis:
-    col_r, col_z = st.columns(2)
-    with col_r:
-        rayon_sel = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
-    with col_z:
-        zona_sel = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
-
-if df_cust.empty:
-    st.error("Data customer tidak ditemukan.")
-    st.stop()
-
-chosen_label = st.selectbox(
-    "Cari & Pilih Customer",
-    options=["— Pilih —"] + df_cust["_label"].tolist(),
-    key="cust_sel",
-)
-
-selected_customer = None
-rayon_final = ""
-zona_final  = ""
-
-if chosen_label != "— Pilih —":
-    match = df_cust[df_cust["_label"] == chosen_label]
-    if not match.empty:
-        selected_customer = match.iloc[0].to_dict()
-
-        if mode_otomatis:
-            rayon_final = str(selected_customer[sales_group_col]).strip() if sales_group_col else ""
-            zona_final  = str(selected_customer[sales_district_col]).strip() if sales_district_col else ""
-            col_r, col_z = st.columns(2)
-            with col_r:
-                st.info(f"**Rayon:** {rayon_final or '—'}")
-            with col_z:
-                st.info(f"**Zona:** {zona_final or '—'}")
-        else:
-            rayon_final = rayon_sel if rayon_sel != "— Pilih —" else ""
-            zona_final  = zona_sel  if zona_sel  != "— Pilih —" else ""
-
-        st.success(
-            f"**{selected_customer[name_col]}** ({selected_customer[code_col]})"
-            + (f" — {selected_customer[addr_col]}" if addr_col else "")
-        )
-
-st.divider()
-
-# ── Bagian 3: GPS ─────────────────────────────────────────────────────────────
-st.subheader("Lokasi GPS")
-st.components.v1.html(GPS_JS, height=90)
-
-if "gps_coords" not in st.session_state:
-    st.session_state.gps_coords = ""
-
-gps_input = st.text_input(
-    "koordinat_gps",
-    value=st.session_state.gps_coords,
-    key="gps_manual",
-    placeholder="Klik tombol di atas untuk mengisi otomatis",
-    label_visibility="collapsed",
-)
-if gps_input:
-    st.session_state.gps_coords = gps_input
-
-st.divider()
-
-# ── Bagian 4: Foto ────────────────────────────────────────────────────────────
-st.subheader("Upload Foto")
-foto_ktp      = st.file_uploader("Foto KTP Pemilik *",       type=["jpg","jpeg","png"], key="foto_ktp")
-foto_sunblind = st.file_uploader("Foto Sunblind *",          type=["jpg","jpeg","png"], key="foto_sunblind")
-foto_display  = st.file_uploader("Foto Display (opsional)",  type=["jpg","jpeg","png"], key="foto_display")
-foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",  type=["jpg","jpeg","png"], key="foto_kompens")
-st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
-
-catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
-
-st.divider()
-
-# ── Submit ────────────────────────────────────────────────────────────────────
-if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
-    errors = []
-    if promotor  == "— Pilih —": errors.append("Eksekutor wajib dipilih")
-    if program   == "— Pilih —": errors.append("Program Investment wajib dipilih")
-    if jenis     == "— Pilih —": errors.append("Jenis Investment wajib dipilih")
-    if brand     == "— Pilih —": errors.append("Brand wajib dipilih")
-    if activity  == "— Pilih —": errors.append("Activity wajib dipilih")
-    if not selected_customer:    errors.append("Customer belum dipilih")
-    if not rayon_final:          errors.append("Rayon tidak ditemukan / belum dipilih")
-    if not zona_final:           errors.append("Zona tidak ditemukan / belum dipilih")
-    if not foto_ktp:             errors.append("Foto KTP wajib diupload")
-    if not foto_sunblind:        errors.append("Foto Sunblind wajib diupload")
-    if not foto_kompens:         errors.append("Foto Bukti Kompensasi wajib diupload")
-
-    if errors:
-        for e in errors:
-            st.error(e)
-    else:
-        with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
-            ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
-            uid = str(uuid.uuid4())[:8]
-            kode = selected_customer.get(code_col, "unknown")
-
-            def safe_upload(file, label):
-                if file is None:
-                    return ""
-                fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
-                return upload_to_drive(compress_image(file), fname)
-
-            url_ktp      = safe_upload(foto_ktp,      "ktp")
-            url_sunblind = safe_upload(foto_sunblind, "sunblind")
-            url_display  = safe_upload(foto_display,  "display")
-            url_kompens  = safe_upload(foto_kompens,  "kompensasi")
-
-            unique_id   = f"{ts}_{uid}"
-            submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
-
-            row = [
-                unique_id,
-                str(tgl),
-                promotor,
-                program,
-                jenis,
-                brand,
-                activity,
-                rayon_final,
-                zona_final,
-                selected_customer.get(name_col, ""),
-                kode,
-                url_sunblind,
-                url_display,
-                url_kompens,
-                url_ktp,
-                st.session_state.gps_coords,
-                catatan,
-                submit_time,
-            ]
-            append_submission(row)
-            st.session_state.submit_info = {
-                "unique_id": unique_id,
-                "outlet": selected_customer.get(name_col, "-"),
-                "kode": kode,
-                "promotor": promotor,
-                "waktu": submit_time,
-            }
-            st.session_state.gps_coords = ""
-            st.cache_data.clear()
+        if st.button("Input Dokumentasi Baru", type="primary"):
+            del st.session_state["submit_info"]
             st.rerun()
+        st.stop()
+
+    with st.spinner("Memuat data..."):
+        promotors, rayon_list, zona_list = load_all_config()
+        df_cust, meta = load_customers()
+
+    code_col           = meta["code_col"]
+    name_col           = meta["name_col"]
+    addr_col           = meta["addr_col"]
+    sales_group_col    = meta["sales_group_col"]
+    sales_district_col = meta["sales_district_col"]
+
+    st.caption(f"Data customer: **{meta['n_aktif']:,} toko aktif** dari {meta['n_total']:,} total")
+    st.divider()
+
+    # Bagian 1: Identitas & Program
+    st.subheader("Identitas & Detail Program")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
+    with col2:
+        promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        program = st.selectbox("Program Investment", ["— Pilih —"] + PROGRAM_OPTIONS, key="program_sel")
+    with col4:
+        jenis = st.selectbox("Jenis Investment", ["— Pilih —"] + JENIS_OPTIONS, key="jenis_sel")
+
+    col5, col6 = st.columns(2)
+    with col5:
+        brand = st.selectbox("Brand", ["— Pilih —"] + BRAND_OPTIONS, key="brand_sel")
+    with col6:
+        activity = st.selectbox("Activity", ["— Pilih —"] + ACTIVITY_OPTIONS, key="activity_sel")
+
+    st.divider()
+
+    # Bagian 2: Customer, Rayon & Zona
+    st.subheader("Customer, Rayon & Zona")
+
+    st.radio(
+        "Mode Rayon & Zona:",
+        ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
+        key="rayon_zona_mode",
+        horizontal=True,
+    )
+    mode_otomatis = st.session_state.rayon_zona_mode == "Otomatis (dari data customer)"
+
+    if not mode_otomatis:
+        col_r, col_z = st.columns(2)
+        with col_r:
+            rayon_sel = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
+        with col_z:
+            zona_sel = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
+
+    if df_cust.empty:
+        st.error("Data customer tidak ditemukan.")
+        st.stop()
+
+    chosen_label = st.selectbox(
+        "Cari & Pilih Customer",
+        options=["— Pilih —"] + df_cust["_label"].tolist(),
+        key="cust_sel",
+    )
+
+    selected_customer = None
+    rayon_final = ""
+    zona_final  = ""
+
+    if chosen_label != "— Pilih —":
+        match = df_cust[df_cust["_label"] == chosen_label]
+        if not match.empty:
+            selected_customer = match.iloc[0].to_dict()
+
+            if mode_otomatis:
+                rayon_final = str(selected_customer[sales_group_col]).strip() if sales_group_col else ""
+                zona_final  = str(selected_customer[sales_district_col]).strip() if sales_district_col else ""
+                col_r, col_z = st.columns(2)
+                with col_r:
+                    st.info(f"**Rayon:** {rayon_final or '—'}")
+                with col_z:
+                    st.info(f"**Zona:** {zona_final or '—'}")
+            else:
+                rayon_final = rayon_sel if rayon_sel != "— Pilih —" else ""
+                zona_final  = zona_sel  if zona_sel  != "— Pilih —" else ""
+
+            st.success(
+                f"**{selected_customer[name_col]}** ({selected_customer[code_col]})"
+                + (f" — {selected_customer[addr_col]}" if addr_col else "")
+            )
+
+    st.divider()
+
+    # Bagian 3: GPS
+    st.subheader("Lokasi GPS")
+    st.components.v1.html(GPS_JS, height=90)
+
+    if "gps_coords" not in st.session_state:
+        st.session_state.gps_coords = ""
+
+    gps_input = st.text_input(
+        "koordinat_gps",
+        value=st.session_state.gps_coords,
+        key="gps_manual",
+        placeholder="Klik tombol di atas untuk mengisi otomatis",
+        label_visibility="collapsed",
+    )
+    if gps_input:
+        st.session_state.gps_coords = gps_input
+
+    st.divider()
+
+    # Bagian 4: Foto
+    st.subheader("Upload Foto")
+    foto_ktp      = st.file_uploader("Foto KTP Pemilik *",       type=["jpg","jpeg","png"], key="foto_ktp")
+    foto_sunblind = st.file_uploader("Foto Sunblind *",          type=["jpg","jpeg","png"], key="foto_sunblind")
+    foto_display  = st.file_uploader("Foto Display (opsional)",  type=["jpg","jpeg","png"], key="foto_display")
+    foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",  type=["jpg","jpeg","png"], key="foto_kompens")
+    st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
+
+    catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
+    st.divider()
+
+    # Submit
+    if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
+        errors = []
+        if promotor  == "— Pilih —": errors.append("Eksekutor wajib dipilih")
+        if program   == "— Pilih —": errors.append("Program Investment wajib dipilih")
+        if jenis     == "— Pilih —": errors.append("Jenis Investment wajib dipilih")
+        if brand     == "— Pilih —": errors.append("Brand wajib dipilih")
+        if activity  == "— Pilih —": errors.append("Activity wajib dipilih")
+        if not selected_customer:    errors.append("Customer belum dipilih")
+        if not rayon_final:          errors.append("Rayon tidak ditemukan / belum dipilih")
+        if not zona_final:           errors.append("Zona tidak ditemukan / belum dipilih")
+        if not foto_ktp:             errors.append("Foto KTP wajib diupload")
+        if not foto_sunblind:        errors.append("Foto Sunblind wajib diupload")
+        if not foto_kompens:         errors.append("Foto Bukti Kompensasi wajib diupload")
+
+        if errors:
+            for e in errors:
+                st.error(e)
+        else:
+            with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
+                ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+                uid = str(uuid.uuid4())[:8]
+                kode = selected_customer.get(code_col, "unknown")
+
+                def safe_upload(file, label):
+                    if file is None:
+                        return ""
+                    fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
+                    return upload_to_drive(compress_image(file), fname)
+
+                url_ktp      = safe_upload(foto_ktp,      "ktp")
+                url_sunblind = safe_upload(foto_sunblind, "sunblind")
+                url_display  = safe_upload(foto_display,  "display")
+                url_kompens  = safe_upload(foto_kompens,  "kompensasi")
+
+                unique_id   = f"{ts}_{uid}"
+                submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
+
+                row = [
+                    unique_id,
+                    str(tgl),
+                    promotor,
+                    program,
+                    jenis,
+                    brand,
+                    activity,
+                    rayon_final,
+                    zona_final,
+                    selected_customer.get(name_col, ""),
+                    kode,
+                    url_sunblind,
+                    url_display,
+                    url_kompens,
+                    url_ktp,
+                    st.session_state.gps_coords,
+                    catatan,
+                    submit_time,
+                ]
+                append_submission(row)
+                st.session_state.submit_info = {
+                    "unique_id": unique_id,
+                    "outlet": selected_customer.get(name_col, "-"),
+                    "kode": kode,
+                    "promotor": promotor,
+                    "waktu": submit_time,
+                }
+                st.session_state.gps_coords = ""
+                st.cache_data.clear()
+                st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 2 — MONITORING ADMIN
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Monitoring (Admin)":
+
+    st.title("Monitoring Investment — Admin")
+
+    # Login check
+    if "admin_authenticated" not in st.session_state:
+        st.session_state.admin_authenticated = False
+
+    if not st.session_state.admin_authenticated:
+        st.subheader("Login Admin")
+        pwd_input = st.text_input("Password", type="password", key="admin_pwd_input")
+        if st.button("Masuk", key="btn_admin_login"):
+            if pwd_input == ADMIN_PASSWORD:
+                st.session_state.admin_authenticated = True
+                st.rerun()
+            else:
+                st.error("Password salah.")
+        st.stop()
+
+    # Admin content
+    col_logout, _ = st.columns([1, 4])
+    with col_logout:
+        if st.button("Keluar", key="btn_logout"):
+            st.session_state.admin_authenticated = False
+            st.rerun()
+
+    today = datetime.datetime.now(WIB).date()
+
+    with st.spinner("Memuat data..."):
+        df_sub = load_submissions()
+
+    if df_sub.empty:
+        st.warning("Belum ada data submission.")
+        st.stop()
+
+    # Normalize kolom
+    df_sub.columns = [c.strip() for c in df_sub.columns]
+
+    # ── Filter ────────────────────────────────────────────────────────────────
+    st.subheader("Filter")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        eksekutor_list = ["Semua"] + sorted(df_sub["Eksekutor"].dropna().unique().tolist()) if "Eksekutor" in df_sub.columns else ["Semua"]
+        filter_eks = st.selectbox("Eksekutor", eksekutor_list, key="filter_eks")
+
+    with col2:
+        activity_list = ["Semua"] + sorted(df_sub["Activity"].dropna().unique().tolist()) if "Activity" in df_sub.columns else ["Semua"]
+        filter_act = st.selectbox("Activity (Termin)", activity_list, key="filter_act")
+
+    with col3:
+        program_list = ["Semua"] + sorted(df_sub["Program Investment"].dropna().unique().tolist()) if "Program Investment" in df_sub.columns else ["Semua"]
+        filter_prog = st.selectbox("Program", program_list, key="filter_prog")
+
+    df_view = df_sub.copy()
+    if filter_eks  != "Semua" and "Eksekutor"         in df_view.columns: df_view = df_view[df_view["Eksekutor"]         == filter_eks]
+    if filter_act  != "Semua" and "Activity"          in df_view.columns: df_view = df_view[df_view["Activity"]          == filter_act]
+    if filter_prog != "Semua" and "Program Investment" in df_view.columns: df_view = df_view[df_view["Program Investment"] == filter_prog]
+
+    st.divider()
+
+    # ── Hitung deadline & countdown ───────────────────────────────────────────
+    def row_deadline_label(row):
+        activity = str(row.get("Activity", "")).strip()
+        date_str = str(row.get("Date", "")).strip()
+        deadline = compute_deadline(date_str, activity)
+        if deadline is None:
+            return "", "", False
+
+        if activity == "Termin 1":
+            label_type = "Jatuh Tempo Termin 2"
+        else:
+            label_type = "Kontrak Berakhir"
+
+        countdown, is_warn = countdown_label(deadline, today)
+        return str(deadline), countdown, is_warn
+
+    deadlines   = []
+    countdowns  = []
+    warnings    = []
+    label_types = []
+
+    for _, row in df_view.iterrows():
+        activity = str(row.get("Activity", "")).strip()
+        date_str = str(row.get("Date", "")).strip()
+        deadline = compute_deadline(date_str, activity)
+
+        if deadline is None:
+            deadlines.append("")
+            countdowns.append("")
+            warnings.append(False)
+            label_types.append("")
+        else:
+            if activity == "Termin 1":
+                label_types.append("Jatuh Tempo Termin 2")
+            else:
+                label_types.append("Kontrak Berakhir")
+
+            deadlines.append(str(deadline))
+            cd, warn = countdown_label(deadline, today)
+            countdowns.append(cd)
+            warnings.append(warn)
+
+    df_view = df_view.copy()
+    df_view["Tipe Deadline"]  = label_types
+    df_view["Tanggal Deadline"] = deadlines
+    df_view["Countdown"]      = countdowns
+    df_view["_warn"]          = warnings
+
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    total_rows   = len(df_view)
+    warn_count   = df_view["_warn"].sum()
+    termin1_done = (df_view["Activity"] == "Termin 1").sum() if "Activity" in df_view.columns else 0
+    termin2_done = (df_view["Activity"] == "Termin 2").sum() if "Activity" in df_view.columns else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Submission", total_rows)
+    c2.metric("Termin 1", termin1_done)
+    c3.metric("Termin 2", termin2_done)
+    c4.metric("Perlu Perhatian", int(warn_count))
+
+    st.divider()
+
+    # ── Tabel dengan highlight ────────────────────────────────────────────────
+    st.subheader("Detail Submission & Deadline")
+
+    display_cols = [c for c in [
+        "Date", "Eksekutor", "Program Investment", "Jenis Investment",
+        "Brand", "Activity", "Rayon", "Zona", "Nama Outlet", "Kode Customer",
+        "Tipe Deadline", "Tanggal Deadline", "Countdown",
+    ] if c in df_view.columns]
+
+    df_display = df_view[display_cols + ["_warn"]].copy()
+
+    def highlight_warn(row):
+        color = "background-color: #fff3cd" if row["_warn"] else ""
+        return [color] * len(row)
+
+    styled = (
+        df_display
+        .style
+        .apply(highlight_warn, axis=1)
+        .hide(axis="index")
+    )
+
+    # Drop _warn dari display tapi tetap dipakai style
+    st.dataframe(
+        df_view[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Countdown": st.column_config.TextColumn("Countdown", help="Kuning = <= 21 hari atau sudah lewat"),
+        }
+    )
+
+    # Highlight manual via tabel HTML karena st.dataframe tidak support row color
+    st.caption("Baris dengan latar kuning = deadline <= 21 hari atau sudah lewat.")
+
+    # Render tabel HTML dengan highlight
+    rows_html = ""
+    for _, row in df_view[display_cols + ["_warn"]].iterrows():
+        bg = ' style="background:#fff3cd"' if row["_warn"] else ""
+        cells = "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{row[c]}</td>" for c in display_cols)
+        rows_html += f"<tr{bg}>{cells}</tr>"
+
+    header_html = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#f0f2f6;text-align:left'>{c}</th>" for c in display_cols)
+
+    table_html = f"""
+    <div style="overflow-x:auto;max-height:600px;overflow-y:auto">
+    <table style="border-collapse:collapse;width:100%;font-size:13px">
+        <thead><tr>{header_html}</tr></thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+    </div>
+    """
+    st.components.v1.html(table_html, height=620, scrolling=True)
