@@ -11,29 +11,36 @@ import uuid
 
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CUSTOMER_SHEET_ID   = "113E5fKvZ0wWloSbQ9IQo8QiCOz5C3zlJr28012PbXz4"
-SUBMISSION_SHEET_ID = "1RC7v1fGmcz-9q4VowhBnf767P2N_ptonqlKuRSug0Ko"
+SUBMISSION_SHEET_ID = "1CL-_9EDLEEuj-x54lrCgNLZYdhuNyncnY8wKylwdg54"
 IMAGE_MAX_PX  = 1920
 IMAGE_QUALITY = 75
 
-PROGRAM_OPTIONS  = ["WSP Permanen", "WSP Non Permanen", "WSP Program", "COI", "Awareness Investment"]
-JENIS_OPTIONS    = ["SNT", "Thinplate", "PNT 3D", "Shopsign"]
-BRAND_OPTIONS    = ["EVO", "ARJA", "Wismilak Kretek"]
-ACTIVITY_OPTIONS = ["Termin 1", "Termin 2"]
+TERMIN_OPTIONS = ["Termin 1", "Termin 2"]
+WSP_OPTIONS    = ["WSP Bronze", "WSP Silver"]
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz68G8gdX7BZEuPRHhrYpHeumsjqIQap5vjz7OwQzStYPAhjcjDsaPyf3QfMKQAbK7R/exec"
+
+SCORING = {
+    "Stock Minimal": 10,
+    "Kebersihan":    10,
+    "Planogram":     20,
+    "Stiker":        10,
+}
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_credentials():
     info = json.loads(st.secrets["gcp_json"])
     return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-@st.cache_resource(ttl=2700)  # Refresh setiap 45 menit, sebelum token 1 jam expire
+@st.cache_resource(ttl=2700)
 def get_gspread():
     return gspread.authorize(get_credentials())
 
-# ── Data loaders ─────────────────────────────────────────────────────────────
+# ── Data loaders ──────────────────────────────────────────────────────────────
 def _sheet_to_df(ws) -> pd.DataFrame:
     rows = ws.get_all_values()
     if not rows:
@@ -46,36 +53,29 @@ def load_customers():
     gc = get_gspread()
     ws = gc.open_by_key(CUSTOMER_SHEET_ID).sheet1
     df = _sheet_to_df(ws)
-    # Pre-compute column indices once
     cols = df.columns.tolist()
-    code_col = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
-    name_col = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
-    addr_col = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
+    code_col           = next((c for c in cols if "customerno" in c.lower() or "kode" in c.lower() or "no" in c.lower()), cols[0])
+    name_col           = next((c for c in cols if c.lower() == "customer" or "nama" in c.lower() or "toko" in c.lower()), cols[0])
+    addr_col           = next((c for c in cols if "alamat" in c.lower() or "address" in c.lower()), None)
     sales_group_col    = next((c for c in cols if "sales group" in c.lower() or "salesgroup" in c.lower()), None)
     sales_district_col = next((c for c in cols if "sales district" in c.lower() or "salesdistrict" in c.lower()), None)
-    status_col = next((c for c in cols if c.lower() == "status"), None)
-
-    # Pre-filter aktif & build labels here (inside cache = runs once)
+    status_col         = next((c for c in cols if c.lower() == "status"), None)
     if status_col:
         df_aktif = df[df[status_col].str.strip().str.lower() == "aktif"].copy()
     else:
         df_aktif = df.copy()
-
     def make_label(r):
         label = f"{r[name_col]} ({r[code_col]})"
         if addr_col:
             label += f" — {str(r[addr_col])[:40]}"
         return label
-
     df_aktif["_label"] = df_aktif.apply(make_label, axis=1)
-
     meta = {
         "code_col": code_col,
         "name_col": name_col,
         "addr_col": addr_col,
         "sales_group_col": sales_group_col,
         "sales_district_col": sales_district_col,
-        "status_col": status_col,
         "n_total": len(df),
         "n_aktif": len(df_aktif),
     }
@@ -91,7 +91,6 @@ def load_config_list(tab_name: str) -> list:
             return []
         return sorted([str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()])
     except Exception:
-        # Token mungkin baru expire — clear cache resource dan retry sekali
         get_gspread.clear()
         try:
             gc = get_gspread()
@@ -106,11 +105,34 @@ def load_config_list(tab_name: str) -> list:
 
 @st.cache_data(ttl=120)
 def load_all_config():
-    """Load promotors, rayon, zona in one cached call."""
-    promotors = load_config_list("Config_NamaPromotor")
-    rayon     = load_config_list("Config_Rayon")
-    zona      = load_config_list("Config_Zona")
-    return promotors, rayon, zona
+    salesman = load_config_list("Config_NamaSalesman")
+    rayon    = load_config_list("Config_Rayon")
+    zona     = load_config_list("Config_Zona")
+    return salesman, rayon, zona
+
+@st.cache_data(ttl=120)
+def load_existing_submissions() -> pd.DataFrame:
+    try:
+        gc = get_gspread()
+        ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
+        return _sheet_to_df(ws)
+    except Exception:
+        return pd.DataFrame()
+
+def check_duplicate_termin(df_sub: pd.DataFrame, kode_customer: str, termin: str) -> bool:
+    if df_sub.empty:
+        return False
+    cols = df_sub.columns.tolist()
+    kode_col   = next((c for c in cols if "kode" in c.lower() or "customer" in c.lower()), None)
+    termin_col = next((c for c in cols if "termin" in c.lower()), None)
+    if not kode_col or not termin_col:
+        return False
+    mask = (
+        df_sub[kode_col].str.strip() == str(kode_customer).strip()
+    ) & (
+        df_sub[termin_col].str.strip() == str(termin).strip()
+    )
+    return mask.any()
 
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
@@ -125,13 +147,15 @@ def compress_image(uploaded_file) -> bytes:
     img.save(buf, format="JPEG", quality=IMAGE_QUALITY, optimize=True)
     return buf.getvalue()
 
-# ── Drive upload via Apps Script ──────────────────────────────────────────────
-APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6BrA7TdHiFVfgsPL2b_xGDkWTqBD30tlGWpCXvQ8F2IXIjO/exec"
-
+# ── Drive upload via Apps Script (form-encoded, sama persis dengan Dokumentasi Promotor) ──
 def upload_to_drive(data: bytes, filename: str) -> str:
     import base64
     b64 = base64.b64encode(data).decode("utf-8")
-    resp = _requests.post(APPS_SCRIPT_URL, data={"image": b64, "filename": filename}, timeout=60)
+    resp = _requests.post(
+        APPS_SCRIPT_URL,
+        data={"image": b64, "filename": filename},
+        timeout=60,
+    )
     resp.raise_for_status()
     result = resp.json()
     if result.get("success"):
@@ -186,34 +210,39 @@ function getLocation() {
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="Dokumentasi Investment Lapangan", layout="centered")
-st.title("Dokumentasi Investment Lapangan")
+st.set_page_config(page_title="Penilaian WSP", layout="centered")
+st.title("Penilaian WSP")
 
 # ── Halaman konfirmasi setelah submit ─────────────────────────────────────────
 if "submit_info" in st.session_state:
     info = st.session_state.submit_info
-    st.success("Dokumentasi berhasil dikirim dan tersimpan.")
+    st.success("Penilaian berhasil dikirim dan tersimpan.")
     st.markdown(f"""
-**Ringkasan pengiriman:**
+**Ringkasan Penilaian:**
 
 | | |
 |---|---|
 | ID Unik | `{info['unique_id']}` |
 | Outlet | {info['outlet']} ({info['kode']}) |
-| Eksekutor | {info['promotor']} |
+| Salesman | {info['salesman']} |
+| Termin | {info['termin']} |
+| Tipe WSP | {info['tipe_wsp']} |
+| Total Nilai | **{info['total']} / 50** |
 | Waktu Kirim | {info['waktu']} |
 
-Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan input baru.
+Data sudah masuk ke sistem.
 """)
-    if st.button("Input Dokumentasi Baru", type="primary"):
+    if st.button("Input Penilaian Baru", type="primary"):
         del st.session_state["submit_info"]
+        st.session_state.pop("confirm_override", None)
         st.rerun()
     st.stop()
 
-# ── Load semua data di awal (paralel via cache) ───────────────────────────────
+# ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Memuat data..."):
-    promotors, rayon_list, zona_list = load_all_config()
+    salesman_list, rayon_list, zona_list = load_all_config()
     df_cust, meta = load_customers()
+    df_sub = load_existing_submissions()
 
 code_col           = meta["code_col"]
 name_col           = meta["name_col"]
@@ -222,38 +251,27 @@ sales_group_col    = meta["sales_group_col"]
 sales_district_col = meta["sales_district_col"]
 
 st.caption(f"Data customer: **{meta['n_aktif']:,} toko aktif** dari {meta['n_total']:,} total")
-
 st.divider()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FORM — satu deret, tanpa step
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Bagian 1: Identitas & Program ─────────────────────────────────────────────
-st.subheader("Identitas & Detail Program")
+# ── Bagian 1: Identitas ───────────────────────────────────────────────────────
+st.subheader("Identitas")
 
 col1, col2 = st.columns(2)
 with col1:
     tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
 with col2:
-    promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
+    salesman = st.selectbox("Salesman", ["— Pilih —"] + salesman_list, key="salesman_sel")
 
 col3, col4 = st.columns(2)
 with col3:
-    program = st.selectbox("Program Investment", ["— Pilih —"] + PROGRAM_OPTIONS, key="program_sel")
+    termin = st.selectbox("Termin Penilaian", ["— Pilih —"] + TERMIN_OPTIONS, key="termin_sel")
 with col4:
-    jenis = st.selectbox("Jenis Investment", ["— Pilih —"] + JENIS_OPTIONS, key="jenis_sel")
-
-col5, col6 = st.columns(2)
-with col5:
-    brand = st.selectbox("Brand", ["— Pilih —"] + BRAND_OPTIONS, key="brand_sel")
-with col6:
-    activity = st.selectbox("Activity", ["— Pilih —"] + ACTIVITY_OPTIONS, key="activity_sel")
+    tipe_wsp = st.selectbox("Tipe WSP", ["— Pilih —"] + WSP_OPTIONS, key="tipe_wsp_sel")
 
 st.divider()
 
-# ── Bagian 2: Customer, Rayon & Zona ─────────────────────────────────────────
-st.subheader("Customer, Rayon & Zona")
+# ── Bagian 2: Customer ────────────────────────────────────────────────────────
+st.subheader("Customer")
 
 st.radio(
     "Mode Rayon & Zona:",
@@ -281,13 +299,15 @@ chosen_label = st.selectbox(
 )
 
 selected_customer = None
-rayon_final = ""
-zona_final  = ""
+rayon_final  = ""
+zona_final   = ""
+is_duplicate = False
 
 if chosen_label != "— Pilih —":
     match = df_cust[df_cust["_label"] == chosen_label]
     if not match.empty:
         selected_customer = match.iloc[0].to_dict()
+        kode_customer = selected_customer.get(code_col, "")
 
         if mode_otomatis:
             rayon_final = str(selected_customer[sales_group_col]).strip() if sales_group_col else ""
@@ -306,9 +326,33 @@ if chosen_label != "— Pilih —":
             + (f" — {selected_customer[addr_col]}" if addr_col else "")
         )
 
+        if termin != "— Pilih —":
+            is_duplicate = check_duplicate_termin(df_sub, kode_customer, termin)
+            if is_duplicate:
+                st.warning(
+                    f"⚠️ Outlet ini sudah pernah disubmit untuk **{termin}**. "
+                    "Kamu tetap bisa submit, tapi pastikan ini bukan duplikat."
+                )
+
 st.divider()
 
-# ── Bagian 3: GPS ─────────────────────────────────────────────────────────────
+# ── Bagian 3: Penilaian ───────────────────────────────────────────────────────
+st.subheader("Penilaian")
+
+scores = {}
+for aspek, maks in SCORING.items():
+    scores[aspek] = st.number_input(
+        f"{aspek} (0 – {maks})",
+        min_value=0, max_value=maks, value=0, step=1,
+        key=f"score_{aspek}",
+    )
+
+total_nilai = sum(scores.values())
+st.metric("Total Nilai", f"{total_nilai} / 50")
+
+st.divider()
+
+# ── Bagian 4: GPS ─────────────────────────────────────────────────────────────
 st.subheader("Lokasi GPS")
 st.components.v1.html(GPS_JS, height=90)
 
@@ -327,12 +371,9 @@ if gps_input:
 
 st.divider()
 
-# ── Bagian 4: Foto ────────────────────────────────────────────────────────────
-st.subheader("Upload Foto")
-foto_ktp      = st.file_uploader("Foto KTP Pemilik *",       type=["jpg","jpeg","png"], key="foto_ktp")
-foto_sunblind = st.file_uploader("Foto Sunblind *",          type=["jpg","jpeg","png"], key="foto_sunblind")
-foto_display  = st.file_uploader("Foto Display (opsional)",  type=["jpg","jpeg","png"], key="foto_display")
-foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",  type=["jpg","jpeg","png"], key="foto_kompens")
+# ── Bagian 5: Foto ────────────────────────────────────────────────────────────
+st.subheader("Foto Dispenser")
+foto_dispenser = st.file_uploader("Foto Dispenser *", type=["jpg", "jpeg", "png"], key="foto_dispenser")
 st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
 
 catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
@@ -340,39 +381,41 @@ catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
 st.divider()
 
 # ── Submit ────────────────────────────────────────────────────────────────────
-if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
+if is_duplicate:
+    confirm_override = st.checkbox(
+        "Saya memahami bahwa outlet ini sudah pernah disubmit untuk termin ini, dan ingin tetap melanjutkan.",
+        key="confirm_override",
+    )
+else:
+    confirm_override = True
+
+if st.button("Submit Penilaian", key="btn_submit", type="primary"):
     errors = []
-    if promotor  == "— Pilih —": errors.append("Eksekutor wajib dipilih")
-    if program   == "— Pilih —": errors.append("Program Investment wajib dipilih")
-    if jenis     == "— Pilih —": errors.append("Jenis Investment wajib dipilih")
-    if brand     == "— Pilih —": errors.append("Brand wajib dipilih")
-    if activity  == "— Pilih —": errors.append("Activity wajib dipilih")
+    if salesman  == "— Pilih —": errors.append("Salesman wajib dipilih")
+    if termin    == "— Pilih —": errors.append("Termin Penilaian wajib dipilih")
+    if tipe_wsp  == "— Pilih —": errors.append("Tipe WSP wajib dipilih")
     if not selected_customer:    errors.append("Customer belum dipilih")
     if not rayon_final:          errors.append("Rayon tidak ditemukan / belum dipilih")
     if not zona_final:           errors.append("Zona tidak ditemukan / belum dipilih")
-    if not foto_ktp:             errors.append("Foto KTP wajib diupload")
-    if not foto_sunblind:        errors.append("Foto Sunblind wajib diupload")
-    if not foto_kompens:         errors.append("Foto Bukti Kompensasi wajib diupload")
+    if not foto_dispenser:       errors.append("Foto Dispenser wajib diupload")
+    if is_duplicate and not confirm_override:
+        errors.append("Centang konfirmasi untuk melanjutkan submit data duplikat")
 
     if errors:
         for e in errors:
             st.error(e)
     else:
         with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
-            ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
-            uid = str(uuid.uuid4())[:8]
+            ts   = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+            uid  = str(uuid.uuid4())[:8]
             kode = selected_customer.get(code_col, "unknown")
 
-            def safe_upload(file, label):
-                if file is None:
-                    return ""
-                fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
-                return upload_to_drive(compress_image(file), fname)
-
-            url_ktp      = safe_upload(foto_ktp,      "ktp")
-            url_sunblind = safe_upload(foto_sunblind, "sunblind")
-            url_display  = safe_upload(foto_display,  "display")
-            url_kompens  = safe_upload(foto_kompens,  "kompensasi")
+            fname = f"{ts}_{kode}_{salesman}_dispenser_{uid}.jpg"
+            try:
+                url_dispenser = upload_to_drive(compress_image(foto_dispenser), fname)
+            except Exception as e:
+                st.error(f"❌ Gagal upload foto:\n\n{e}")
+                st.stop()
 
             unique_id   = f"{ts}_{uid}"
             submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
@@ -380,30 +423,38 @@ if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
             row = [
                 unique_id,
                 str(tgl),
-                promotor,
-                program,
-                jenis,
-                brand,
-                activity,
+                salesman,
+                termin,
+                tipe_wsp,
+                kode,
+                selected_customer.get(name_col, ""),
                 rayon_final,
                 zona_final,
-                selected_customer.get(name_col, ""),
-                kode,
-                url_sunblind,
-                url_display,
-                url_kompens,
-                url_ktp,
+                scores["Stock Minimal"],
+                scores["Kebersihan"],
+                scores["Planogram"],
+                scores["Stiker"],
+                total_nilai,
+                url_dispenser,
                 st.session_state.gps_coords,
                 catatan,
                 submit_time,
             ]
-            append_submission(row)
+            try:
+                append_submission(row)
+            except Exception as e:
+                st.error(f"❌ Foto berhasil diupload, tapi gagal simpan ke Google Sheets:\n\n{e}")
+                st.stop()
+
             st.session_state.submit_info = {
                 "unique_id": unique_id,
-                "outlet": selected_customer.get(name_col, "-"),
-                "kode": kode,
-                "promotor": promotor,
-                "waktu": submit_time,
+                "outlet":    selected_customer.get(name_col, "-"),
+                "kode":      kode,
+                "salesman":  salesman,
+                "termin":    termin,
+                "tipe_wsp":  tipe_wsp,
+                "total":     total_nilai,
+                "waktu":     submit_time,
             }
             st.session_state.gps_coords = ""
             st.cache_data.clear()
