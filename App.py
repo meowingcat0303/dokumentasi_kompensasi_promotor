@@ -8,6 +8,7 @@ import io
 import json
 import datetime
 import uuid
+import time
 
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 
@@ -140,15 +141,30 @@ def compress_image(uploaded_file) -> bytes:
 # ── Drive upload ──────────────────────────────────────────────────────────────
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6BrA7TdHiFVfgsPL2b_xGDkWTqBD30tlGWpCXvQ8F2IXIjO/exec"
 
-def upload_to_drive(data: bytes, filename: str) -> str:
+def upload_to_drive(data: bytes, filename: str, retries: int = 3) -> str:
     import base64
     b64 = base64.b64encode(data).decode("utf-8")
-    resp = _requests.post(APPS_SCRIPT_URL, data={"image": b64, "filename": filename}, timeout=60)
-    resp.raise_for_status()
-    result = resp.json()
-    if result.get("success"):
-        return result["url"]
-    raise ValueError(f"Apps Script error: {result}")
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            resp = _requests.post(
+                APPS_SCRIPT_URL,
+                data={"image": b64, "filename": filename},
+                timeout=90,
+            )
+            if not resp.ok:
+                st.warning(f"Upload attempt {attempt+1} gagal: HTTP {resp.status_code} — {resp.text[:300]}")
+                resp.raise_for_status()
+            result = resp.json()
+            if result.get("success"):
+                return result["url"]
+            raise ValueError(f"Apps Script error: {result}")
+        except (_requests.exceptions.HTTPError, _requests.exceptions.Timeout) as e:
+            last_exc = e
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise last_exc
 
 # ── Submission writer ─────────────────────────────────────────────────────────
 def append_submission(row: list):
@@ -419,6 +435,7 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                     if file is None:
                         return ""
                     fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
+                    time.sleep(1)
                     return upload_to_drive(compress_image(file), fname)
 
                 url_ktp      = safe_upload(foto_ktp,      "ktp")
