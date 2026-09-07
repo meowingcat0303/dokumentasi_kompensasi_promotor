@@ -1219,10 +1219,21 @@ elif page == "Monitoring (Admin)":
                     disabled=not st.session_state.fb_dirty,
                 )
 
+            n_q = len(questions)
+            pos_options = [f"Posisi {i+1} (sebelum '{questions[i]['label']}')" for i in range(n_q)]
+            pos_options.append(f"Posisi {n_q+1} (paling bawah)")
+            insert_pos = st.selectbox(
+                "Tambahkan di:",
+                options=list(range(n_q + 1)),
+                index=n_q,
+                format_func=lambda i: pos_options[i],
+                key="fb_insert_pos",
+            )
+
             if st.button("➕ Tambah Pertanyaan", key="fb_add", use_container_width=False):
                 new_q = {
                     "question_id": str(uuid.uuid4())[:8],
-                    "order": len(questions) + 1,
+                    "order": insert_pos + 1,
                     "section": "",
                     "label": "Pertanyaan Baru",
                     "type": new_type[0],
@@ -1235,7 +1246,7 @@ elif page == "Monitoring (Admin)":
                     "allow_other": False,
                     "visible": True,
                 }
-                st.session_state.fb_questions.append(new_q)
+                st.session_state.fb_questions.insert(insert_pos, new_q)
                 st.session_state.fb_dirty = True
                 st.rerun()
 
