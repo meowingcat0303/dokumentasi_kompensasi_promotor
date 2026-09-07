@@ -31,7 +31,26 @@ TERMIN_MONTHS = 6
 REMINDER_DAYS = 21
 
 # ── Form Builder Tab di Google Sheets ─────────────────────────────────────────
-FORM_CONFIG_TAB = "Config_FormBuilder"
+FORM_CONFIG_TAB        = "Config_FormBuilder"
+FIXED_FIELDS_TAB       = "Config_FixedFields"
+SPREADSHEET_CONFIG_TAB = "Config_Spreadsheets"
+
+# ── Definisi field tetap (urutan & metadata default) ──────────────────────────
+DEFAULT_FIXED_FIELDS = [
+    {"field_id": "tanggal",   "label": "Tanggal",             "type": "date",     "required": True,  "visible": True,  "options": []},
+    {"field_id": "promotor",  "label": "Eksekutor (Promotor)","type": "dropdown", "required": True,  "visible": True,  "options": []},  # opsi dari Config_NamaPromotor
+    {"field_id": "program",   "label": "Program Investment",  "type": "dropdown", "required": True,  "visible": True,  "options": PROGRAM_OPTIONS},
+    {"field_id": "jenis",     "label": "Jenis Investment",    "type": "dropdown", "required": True,  "visible": True,  "options": JENIS_OPTIONS},
+    {"field_id": "brand",     "label": "Brand",               "type": "dropdown", "required": True,  "visible": True,  "options": BRAND_OPTIONS},
+    {"field_id": "activity",  "label": "Activity",            "type": "dropdown", "required": True,  "visible": True,  "options": ACTIVITY_OPTIONS},
+    {"field_id": "customer",  "label": "Customer",            "type": "customer", "required": True,  "visible": True,  "options": []},
+    {"field_id": "gps",       "label": "Lokasi GPS",          "type": "gps",      "required": False, "visible": True,  "options": []},
+    {"field_id": "foto_ktp",       "label": "Foto KTP Pemilik",      "type": "photo", "required": True,  "visible": True, "options": []},
+    {"field_id": "foto_sunblind",  "label": "Foto Sunblind",          "type": "photo", "required": True,  "visible": True, "options": []},
+    {"field_id": "foto_display",   "label": "Foto Display",           "type": "photo", "required": False, "visible": True, "options": []},
+    {"field_id": "foto_kompens",   "label": "Foto Bukti Kompensasi", "type": "photo", "required": True,  "visible": True, "options": []},
+    {"field_id": "catatan",   "label": "Catatan Tambahan",    "type": "textarea", "required": False, "visible": True,  "options": []},
+]
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -218,6 +237,133 @@ def save_form_config(questions: list):
     ws.update(rows, "A1")
     load_form_config.clear()
 
+# ── Fixed Fields: Load & Save ─────────────────────────────────────────────────
+@st.cache_data(ttl=30)
+def load_fixed_fields() -> list:
+    """Load konfigurasi field tetap. Fallback ke DEFAULT_FIXED_FIELDS jika belum ada."""
+    try:
+        gc = get_gspread()
+        wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+        try:
+            ws = wb.worksheet(FIXED_FIELDS_TAB)
+        except Exception:
+            return [dict(f) for f in DEFAULT_FIXED_FIELDS]
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return [dict(f) for f in DEFAULT_FIXED_FIELDS]
+        headers = rows[0]
+        result = []
+        for r in rows[1:]:
+            if not any(r):
+                continue
+            d = dict(zip(headers, r + [""] * (len(headers) - len(r))))
+            result.append({
+                "field_id": d.get("field_id", ""),
+                "label":    d.get("label", ""),
+                "type":     d.get("type", "text"),
+                "required": d.get("required", "true").lower() == "true",
+                "visible":  d.get("visible", "true").lower() != "false",
+                "options":  [o.strip() for o in d.get("options", "").split("|") if o.strip()],
+            })
+        return result
+    except Exception as e:
+        st.warning(f"Gagal load fixed fields: {e}")
+        return [dict(f) for f in DEFAULT_FIXED_FIELDS]
+
+def save_fixed_fields(fields: list):
+    gc = get_gspread()
+    wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+    try:
+        ws = wb.worksheet(FIXED_FIELDS_TAB)
+    except Exception:
+        ws = wb.add_worksheet(title=FIXED_FIELDS_TAB, rows=100, cols=10)
+    headers = ["field_id", "label", "type", "required", "visible", "options"]
+    rows = [headers]
+    for f in fields:
+        rows.append([
+            f.get("field_id", ""),
+            f.get("label", ""),
+            f.get("type", "text"),
+            str(f.get("required", True)).lower(),
+            str(f.get("visible", True)).lower(),
+            "|".join(f.get("options", [])),
+        ])
+    ws.clear()
+    ws.update(rows, "A1")
+    load_fixed_fields.clear()
+
+def get_fixed_field(fields: list, field_id: str) -> dict:
+    """Ambil config field by ID, fallback ke default."""
+    for f in fields:
+        if f["field_id"] == field_id:
+            return f
+    for f in DEFAULT_FIXED_FIELDS:
+        if f["field_id"] == field_id:
+            return dict(f)
+    return {}
+
+# ── Spreadsheet Manager: Load & Save ──────────────────────────────────────────
+@st.cache_data(ttl=60)
+def load_spreadsheet_list() -> list:
+    """Load daftar spreadsheet yang terdaftar. Format: [{name, submission_id, customer_id, active}]"""
+    try:
+        gc = get_gspread()
+        wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+        try:
+            ws = wb.worksheet(SPREADSHEET_CONFIG_TAB)
+        except Exception:
+            return []
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        headers = rows[0]
+        result = []
+        for r in rows[1:]:
+            if not any(r):
+                continue
+            d = dict(zip(headers, r + [""] * (len(headers) - len(r))))
+            result.append({
+                "name":          d.get("name", ""),
+                "submission_id": d.get("submission_id", ""),
+                "customer_id":   d.get("customer_id", ""),
+                "active":        d.get("active", "false").lower() == "true",
+                "description":   d.get("description", ""),
+            })
+        return result
+    except Exception:
+        return []
+
+def save_spreadsheet_list(sheets: list):
+    gc = get_gspread()
+    wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+    try:
+        ws = wb.worksheet(SPREADSHEET_CONFIG_TAB)
+    except Exception:
+        ws = wb.add_worksheet(title=SPREADSHEET_CONFIG_TAB, rows=100, cols=10)
+    headers = ["name", "submission_id", "customer_id", "active", "description"]
+    rows = [headers]
+    for s in sheets:
+        rows.append([
+            s.get("name", ""),
+            s.get("submission_id", ""),
+            s.get("customer_id", ""),
+            str(s.get("active", False)).lower(),
+            s.get("description", ""),
+        ])
+    ws.clear()
+    ws.update(rows, "A1")
+    load_spreadsheet_list.clear()
+
+def get_active_sheet_ids() -> tuple[str, str]:
+    """Return (submission_id, customer_id) yang aktif. Fallback ke konstanta default."""
+    sheets = load_spreadsheet_list()
+    for s in sheets:
+        if s.get("active"):
+            sub = s.get("submission_id") or SUBMISSION_SHEET_ID
+            cus = s.get("customer_id") or CUSTOMER_SHEET_ID
+            return sub, cus
+    return SUBMISSION_SHEET_ID, CUSTOMER_SHEET_ID
+
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
     img = Image.open(uploaded_file)
@@ -380,6 +526,7 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
     with st.spinner("Memuat data..."):
         promotors, rayon_list, zona_list = load_all_config()
         df_cust, meta = load_customers()
+        ff = load_fixed_fields()  # fixed fields config
 
     code_col           = meta["code_col"]
     name_col           = meta["name_col"]
@@ -390,30 +537,68 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
     st.caption(f"Data customer: **{meta['n_aktif']:,} toko aktif** dari {meta['n_total']:,} total")
     st.divider()
 
-    # Bagian 1: Identitas & Program
+    # Helper: ambil label dari fixed fields config
+    def ff_label(field_id, default):
+        f = get_fixed_field(ff, field_id)
+        lbl = f.get("label", default)
+        req = f.get("required", True)
+        return lbl + (" *" if req else " (opsional)")
+
+    def ff_visible(field_id):
+        f = get_fixed_field(ff, field_id)
+        return f.get("visible", True)
+
+    def ff_required(field_id):
+        f = get_fixed_field(ff, field_id)
+        return f.get("required", True)
+
+    def ff_options(field_id, default_opts):
+        f = get_fixed_field(ff, field_id)
+        opts = f.get("options", [])
+        return opts if opts else default_opts
+
+    # ── Bagian 1: Identitas & Program ────────────────────────────────────────
     st.subheader("Identitas & Detail Program")
 
     col1, col2 = st.columns(2)
     with col1:
-        tgl = st.date_input("Tanggal", value=datetime.datetime.now(WIB).date(), key="tgl_sel")
+        if ff_visible("tanggal"):
+            tgl = st.date_input(ff_label("tanggal", "Tanggal"), value=datetime.datetime.now(WIB).date(), key="tgl_sel")
+        else:
+            tgl = datetime.datetime.now(WIB).date()
     with col2:
-        promotor = st.selectbox("Eksekutor (Promotor)", ["— Pilih —"] + promotors, key="promotor_sel")
+        if ff_visible("promotor"):
+            promotor = st.selectbox(ff_label("promotor", "Eksekutor (Promotor)"), ["— Pilih —"] + promotors, key="promotor_sel")
+        else:
+            promotor = "—"
 
     col3, col4 = st.columns(2)
     with col3:
-        program = st.selectbox("Program Investment", ["— Pilih —"] + PROGRAM_OPTIONS, key="program_sel")
+        if ff_visible("program"):
+            program = st.selectbox(ff_label("program", "Program Investment"), ["— Pilih —"] + ff_options("program", PROGRAM_OPTIONS), key="program_sel")
+        else:
+            program = "—"
     with col4:
-        jenis = st.selectbox("Jenis Investment", ["— Pilih —"] + JENIS_OPTIONS, key="jenis_sel")
+        if ff_visible("jenis"):
+            jenis = st.selectbox(ff_label("jenis", "Jenis Investment"), ["— Pilih —"] + ff_options("jenis", JENIS_OPTIONS), key="jenis_sel")
+        else:
+            jenis = "—"
 
     col5, col6 = st.columns(2)
     with col5:
-        brand = st.selectbox("Brand", ["— Pilih —"] + BRAND_OPTIONS, key="brand_sel")
+        if ff_visible("brand"):
+            brand = st.selectbox(ff_label("brand", "Brand"), ["— Pilih —"] + ff_options("brand", BRAND_OPTIONS), key="brand_sel")
+        else:
+            brand = "—"
     with col6:
-        activity = st.selectbox("Activity", ["— Pilih —"] + ACTIVITY_OPTIONS, key="activity_sel")
+        if ff_visible("activity"):
+            activity = st.selectbox(ff_label("activity", "Activity"), ["— Pilih —"] + ff_options("activity", ACTIVITY_OPTIONS), key="activity_sel")
+        else:
+            activity = "—"
 
     st.divider()
 
-    # Bagian 2: Customer, Rayon & Zona
+    # ── Bagian 2: Customer, Rayon & Zona ─────────────────────────────────────
     st.subheader("Customer, Rayon & Zona")
 
     st.radio(
@@ -435,11 +620,14 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
         st.error("Data customer tidak ditemukan.")
         st.stop()
 
-    chosen_label = st.selectbox(
-        "Cari & Pilih Customer",
-        options=["— Pilih —"] + df_cust["_label"].tolist(),
-        key="cust_sel",
-    )
+    if ff_visible("customer"):
+        chosen_label = st.selectbox(
+            ff_label("customer", "Cari & Pilih Customer"),
+            options=["— Pilih —"] + df_cust["_label"].tolist(),
+            key="cust_sel",
+        )
+    else:
+        chosen_label = "— Pilih —"
 
     selected_customer = None
     rayon_final = ""
@@ -469,32 +657,41 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
 
     st.divider()
 
-    # Bagian 3: GPS
-    st.subheader("Lokasi GPS")
-    st.components.v1.html(GPS_JS, height=90)
+    # ── Bagian 3: GPS ─────────────────────────────────────────────────────────
+    if ff_visible("gps"):
+        st.subheader(get_fixed_field(ff, "gps").get("label", "Lokasi GPS"))
+        st.components.v1.html(GPS_JS, height=90)
 
     if "gps_coords" not in st.session_state:
         st.session_state.gps_coords = ""
 
-    gps_input = st.text_input(
-        "koordinat_gps",
-        value=st.session_state.gps_coords,
-        key="gps_manual",
-        placeholder="Klik tombol di atas untuk mengisi otomatis",
-        label_visibility="collapsed",
-    )
-    if gps_input:
-        st.session_state.gps_coords = gps_input
+    if ff_visible("gps"):
+        gps_input = st.text_input(
+            "koordinat_gps",
+            value=st.session_state.gps_coords,
+            key="gps_manual",
+            placeholder="Klik tombol di atas untuk mengisi otomatis",
+            label_visibility="collapsed",
+        )
+        if gps_input:
+            st.session_state.gps_coords = gps_input
 
     st.divider()
 
-    # Bagian 4: Foto
-    st.subheader("Upload Foto")
-    foto_ktp      = st.file_uploader("Foto KTP Pemilik *",       type=["jpg","jpeg","png"], key="foto_ktp")
-    foto_sunblind = st.file_uploader("Foto Sunblind *",          type=["jpg","jpeg","png"], key="foto_sunblind")
-    foto_display  = st.file_uploader("Foto Display (opsional)",  type=["jpg","jpeg","png"], key="foto_display")
-    foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",  type=["jpg","jpeg","png"], key="foto_kompens")
-    st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
+    # ── Bagian 4: Foto ────────────────────────────────────────────────────────
+    foto_fields = ["foto_ktp", "foto_sunblind", "foto_display", "foto_kompens"]
+    any_foto_visible = any(ff_visible(fid) for fid in foto_fields)
+
+    if any_foto_visible:
+        st.subheader("Upload Foto")
+
+    foto_ktp      = st.file_uploader(ff_label("foto_ktp",      "Foto KTP Pemilik"),      type=["jpg","jpeg","png"], key="foto_ktp")      if ff_visible("foto_ktp")      else None
+    foto_sunblind = st.file_uploader(ff_label("foto_sunblind", "Foto Sunblind"),          type=["jpg","jpeg","png"], key="foto_sunblind") if ff_visible("foto_sunblind") else None
+    foto_display  = st.file_uploader(ff_label("foto_display",  "Foto Display"),           type=["jpg","jpeg","png"], key="foto_display")  if ff_visible("foto_display")  else None
+    foto_kompens  = st.file_uploader(ff_label("foto_kompens",  "Foto Bukti Kompensasi"),  type=["jpg","jpeg","png"], key="foto_kompens")  if ff_visible("foto_kompens")  else None
+
+    if any_foto_visible:
+        st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
 
     # ── Pertanyaan Tambahan dari Form Builder ──────────────────────────────────
     extra_questions = load_form_config()
@@ -587,23 +784,37 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                 elif qtype == "yes_no":
                     extra_answers[qid] = "Ya" if st.toggle(label, key=f"eq_{qid}") else "Tidak"
 
-    catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
+    if ff_visible("catatan"):
+        catatan = st.text_area(ff_label("catatan", "Catatan Tambahan"), key="catatan_input")
+    else:
+        catatan = ""
     st.divider()
 
     # Submit
     if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
         errors = []
-        if promotor  == "— Pilih —": errors.append("Eksekutor wajib dipilih")
-        if program   == "— Pilih —": errors.append("Program Investment wajib dipilih")
-        if jenis     == "— Pilih —": errors.append("Jenis Investment wajib dipilih")
-        if brand     == "— Pilih —": errors.append("Brand wajib dipilih")
-        if activity  == "— Pilih —": errors.append("Activity wajib dipilih")
-        if not selected_customer:    errors.append("Customer belum dipilih")
-        if not rayon_final:          errors.append("Rayon tidak ditemukan / belum dipilih")
-        if not zona_final:           errors.append("Zona tidak ditemukan / belum dipilih")
-        if not foto_ktp:             errors.append("Foto KTP wajib diupload")
-        if not foto_sunblind:        errors.append("Foto Sunblind wajib diupload")
-        if not foto_kompens:         errors.append("Foto Bukti Kompensasi wajib diupload")
+        if ff_visible("promotor") and ff_required("promotor") and promotor == "— Pilih —":
+            errors.append(f"{get_fixed_field(ff,'promotor').get('label','Eksekutor')} wajib dipilih")
+        if ff_visible("program") and ff_required("program") and program == "— Pilih —":
+            errors.append(f"{get_fixed_field(ff,'program').get('label','Program Investment')} wajib dipilih")
+        if ff_visible("jenis") and ff_required("jenis") and jenis == "— Pilih —":
+            errors.append(f"{get_fixed_field(ff,'jenis').get('label','Jenis Investment')} wajib dipilih")
+        if ff_visible("brand") and ff_required("brand") and brand == "— Pilih —":
+            errors.append(f"{get_fixed_field(ff,'brand').get('label','Brand')} wajib dipilih")
+        if ff_visible("activity") and ff_required("activity") and activity == "— Pilih —":
+            errors.append(f"{get_fixed_field(ff,'activity').get('label','Activity')} wajib dipilih")
+        if ff_visible("customer") and ff_required("customer") and not selected_customer:
+            errors.append(f"{get_fixed_field(ff,'customer').get('label','Customer')} belum dipilih")
+        if ff_visible("customer") and selected_customer and not rayon_final:
+            errors.append("Rayon tidak ditemukan / belum dipilih")
+        if ff_visible("customer") and selected_customer and not zona_final:
+            errors.append("Zona tidak ditemukan / belum dipilih")
+        if ff_visible("foto_ktp") and ff_required("foto_ktp") and not foto_ktp:
+            errors.append(f"{get_fixed_field(ff,'foto_ktp').get('label','Foto KTP')} wajib diupload")
+        if ff_visible("foto_sunblind") and ff_required("foto_sunblind") and not foto_sunblind:
+            errors.append(f"{get_fixed_field(ff,'foto_sunblind').get('label','Foto Sunblind')} wajib diupload")
+        if ff_visible("foto_kompens") and ff_required("foto_kompens") and not foto_kompens:
+            errors.append(f"{get_fixed_field(ff,'foto_kompens').get('label','Foto Bukti Kompensasi')} wajib diupload")
 
         # Validasi pertanyaan tambahan yang wajib
         for q in visible_questions:
@@ -843,24 +1054,132 @@ elif page == "Monitoring (Admin)":
     # TAB 2: FORM BUILDER
     # ══════════════════════════════════════════════════════════════════════════
     with tab_formbuilder:
-        st.subheader("Form Builder — Pertanyaan Tambahan")
-        st.caption(
-            "Tambahkan, edit, atau hapus pertanyaan yang akan muncul di halaman Input Dokumentasi. "
-            "Mirip seperti Google Form — atur tipe jawaban, wajib/tidak, hingga pilihan."
-        )
+        st.subheader("Form Builder")
+        st.caption("Kelola semua pertanyaan yang tampil di halaman Input Dokumentasi.")
 
-        # Inisialisasi session state form builder
-        if "fb_questions" not in st.session_state:
-            with st.spinner("Memuat konfigurasi form..."):
-                st.session_state.fb_questions = load_form_config()
+        subtab_fixed, subtab_extra = st.tabs(["🔒 Pertanyaan Tetap", "➕ Pertanyaan Tambahan"])
 
-        if "fb_dirty" not in st.session_state:
-            st.session_state.fb_dirty = False
+        # ══════════════════════════════════════════════════════════════════════
+        # SUBTAB A: PERTANYAAN TETAP
+        # ══════════════════════════════════════════════════════════════════════
+        with subtab_fixed:
+            st.caption(
+                "Pertanyaan bawaan sistem (Tanggal, Promotor, Program, dll). "
+                "Anda bisa ubah label, tandai wajib/tidak, sembunyikan, atau edit pilihan dropdown."
+            )
 
-        questions = st.session_state.fb_questions
+            if "ff_fields" not in st.session_state:
+                with st.spinner("Memuat konfigurasi..."):
+                    st.session_state.ff_fields = load_fixed_fields()
+            if "ff_dirty" not in st.session_state:
+                st.session_state.ff_dirty = False
 
-        # ── Toolbar ───────────────────────────────────────────────────────────
-        col_add, col_reload, col_save = st.columns([2, 1, 1])
+            ff_fields = st.session_state.ff_fields
+
+            col_ff_reload, col_ff_save = st.columns([1, 1])
+            with col_ff_reload:
+                if st.button("🔄 Reload", key="ff_reload", use_container_width=True):
+                    load_fixed_fields.clear()
+                    st.session_state.ff_fields = load_fixed_fields()
+                    st.session_state.ff_dirty = False
+                    st.rerun()
+            with col_ff_save:
+                ff_save_btn = st.button(
+                    "💾 Simpan", key="ff_save", type="primary",
+                    use_container_width=True, disabled=not st.session_state.ff_dirty,
+                )
+
+            if st.session_state.ff_dirty:
+                st.info("⚠️ Ada perubahan yang belum disimpan.")
+
+            st.divider()
+
+            FIXED_TYPE_LABELS = {
+                "date": "📅 Tanggal", "dropdown": "▼ Dropdown", "customer": "🏪 Pilih Customer",
+                "gps": "📍 GPS", "photo": "📷 Upload Foto", "textarea": "📄 Teks Panjang",
+                "text": "📝 Teks", "radio": "⭕ Pilihan Ganda", "checkbox": "☑️ Centang",
+            }
+            # Field mana yang boleh edit options-nya
+            EDITABLE_OPTIONS_FIELDS = {"program", "jenis", "brand", "activity"}
+            # Field yang tipe-nya tidak boleh diganti (tetap)
+            LOCKED_TYPE_FIELDS = {"tanggal", "promotor", "customer", "gps", "foto_ktp", "foto_sunblind", "foto_display", "foto_kompens"}
+
+            for f in ff_fields:
+                fid   = f["field_id"]
+                icon  = FIXED_TYPE_LABELS.get(f["type"], "📝")
+                vis_m = "" if f.get("visible", True) else " 🚫"
+                req_m = " *" if f.get("required") else ""
+
+                with st.expander(f"{icon} {f['label']}{req_m}{vis_m}   —   *{f['type']}*", expanded=False):
+                    row_ff = st.columns([1, 1, 1])
+                    with row_ff[0]:
+                        vis_lbl = "👁️ Tampil" if f.get("visible", True) else "🙈 Tersembunyi"
+                        if st.button(vis_lbl, key=f"ff_vis_{fid}"):
+                            f["visible"] = not f.get("visible", True)
+                            st.session_state.ff_dirty = True
+                            st.rerun()
+                    with row_ff[1]:
+                        req_lbl = "✅ Wajib" if f.get("required") else "❌ Tidak Wajib"
+                        if st.button(req_lbl, key=f"ff_req_{fid}"):
+                            f["required"] = not f.get("required", True)
+                            st.session_state.ff_dirty = True
+                            st.rerun()
+                    with row_ff[2]:
+                        if st.button("↩️ Reset Default", key=f"ff_reset_{fid}"):
+                            default = next((d for d in DEFAULT_FIXED_FIELDS if d["field_id"] == fid), None)
+                            if default:
+                                f.update(dict(default))
+                                st.session_state.ff_dirty = True
+                                st.rerun()
+
+                    st.divider()
+                    new_label = st.text_input("Label", value=f["label"], key=f"ff_label_{fid}")
+                    if new_label != f["label"]:
+                        f["label"] = new_label
+                        st.session_state.ff_dirty = True
+
+                    # Edit opsi hanya untuk dropdown yang relevan
+                    if fid in EDITABLE_OPTIONS_FIELDS:
+                        st.markdown("**Pilihan Dropdown** (satu per baris)")
+                        current_opts = "\n".join(f.get("options", []))
+                        new_opts_raw = st.text_area(
+                            "Opsi", value=current_opts, key=f"ff_opts_{fid}",
+                            height=100, label_visibility="collapsed",
+                        )
+                        new_opts = [o.strip() for o in new_opts_raw.splitlines() if o.strip()]
+                        if new_opts != f.get("options", []):
+                            f["options"] = new_opts
+                            st.session_state.ff_dirty = True
+
+            if ff_save_btn:
+                with st.spinner("Menyimpan..."):
+                    save_fixed_fields(ff_fields)
+                    st.session_state.ff_dirty = False
+                st.success("✅ Konfigurasi field tetap disimpan!")
+                time.sleep(1)
+                st.rerun()
+
+        # ══════════════════════════════════════════════════════════════════════
+        # SUBTAB B: PERTANYAAN TAMBAHAN
+        # ══════════════════════════════════════════════════════════════════════
+        with subtab_extra:
+            st.caption(
+                "Tambahkan, edit, atau hapus pertanyaan ekstra yang muncul setelah form utama. "
+                "Mirip seperti Google Form — atur tipe jawaban, wajib/tidak, hingga pilihan."
+            )
+
+            # Inisialisasi session state form builder
+            if "fb_questions" not in st.session_state:
+                with st.spinner("Memuat konfigurasi form..."):
+                    st.session_state.fb_questions = load_form_config()
+
+            if "fb_dirty" not in st.session_state:
+                st.session_state.fb_dirty = False
+
+            questions = st.session_state.fb_questions
+
+            # ── Toolbar ───────────────────────────────────────────────────────
+            col_add, col_reload, col_save = st.columns([2, 1, 1])
 
         with col_add:
             new_type = st.selectbox(
@@ -882,276 +1201,276 @@ elif page == "Monitoring (Admin)":
                 key="fb_new_type",
             )
 
-        with col_reload:
-            st.write("")
-            if st.button("🔄 Reload", key="fb_reload", use_container_width=True):
-                load_form_config.clear()
-                st.session_state.fb_questions = load_form_config()
-                st.session_state.fb_dirty = False
-                st.rerun()
-
-        with col_save:
-            st.write("")
-            save_btn = st.button(
-                "💾 Simpan Semua",
-                key="fb_save",
-                type="primary",
-                use_container_width=True,
-                disabled=not st.session_state.fb_dirty,
-            )
-
-        if st.button("➕ Tambah Pertanyaan", key="fb_add", use_container_width=False):
-            new_q = {
-                "question_id": str(uuid.uuid4())[:8],
-                "order": len(questions) + 1,
-                "section": "",
-                "label": "Pertanyaan Baru",
-                "type": new_type[0],
-                "required": False,
-                "options": [],
-                "placeholder": "",
-                "description": "",
-                "min_value": "",
-                "max_value": "",
-                "allow_other": False,
-                "visible": True,
-            }
-            st.session_state.fb_questions.append(new_q)
-            st.session_state.fb_dirty = True
-            st.rerun()
-
-        if st.session_state.fb_dirty:
-            st.info("⚠️ Ada perubahan yang belum disimpan. Klik **Simpan Semua** untuk menyimpan ke Google Sheets.")
-
-        st.divider()
-
-        # ── Daftar Pertanyaan ─────────────────────────────────────────────────
-        TYPE_LABELS = {
-            "text":     "Jawaban Singkat",
-            "textarea": "Paragraf",
-            "number":   "Angka",
-            "date":     "Tanggal",
-            "time":     "Waktu",
-            "dropdown": "Dropdown",
-            "radio":    "Pilihan Ganda",
-            "checkbox": "Kotak Centang",
-            "scale":    "Skala / Rating",
-            "yes_no":   "Ya / Tidak",
-            "photo":    "Upload Foto",
-        }
-
-        TYPE_ICONS = {
-            "text":     "📝",
-            "textarea": "📄",
-            "number":   "🔢",
-            "date":     "📅",
-            "time":     "🕐",
-            "dropdown": "▼",
-            "radio":    "⭕",
-            "checkbox": "☑️",
-            "scale":    "⭐",
-            "yes_no":   "✅",
-            "photo":    "📷",
-        }
-
-        if not questions:
-            st.markdown(
-                """
-                <div style="text-align:center;padding:40px;color:#888;border:2px dashed #ddd;border-radius:12px;margin:20px 0">
-                    <div style="font-size:48px;margin-bottom:12px">📋</div>
-                    <div style="font-size:16px">Belum ada pertanyaan tambahan.</div>
-                    <div style="font-size:13px;margin-top:8px">Klik <b>Tambah Pertanyaan</b> untuk memulai.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        to_delete = None
-
-        for idx, q in enumerate(questions):
-            qid   = q["question_id"]
-            qtype = q["type"]
-            icon  = TYPE_ICONS.get(qtype, "📝")
-            tlabel = TYPE_LABELS.get(qtype, qtype)
-            visible_marker = "" if q.get("visible", True) else " 🚫"
-            required_marker = " *" if q.get("required") else ""
-
-            with st.expander(
-                f"{icon} {idx+1}. {q['label']}{required_marker}{visible_marker}   —   *{tlabel}*",
-                expanded=False,
-            ):
-                # ── Baris kontrol atas ───────────────────────────────────────
-                row_ctrl = st.columns([1, 1, 1, 1, 1])
-                with row_ctrl[0]:
-                    if st.button("⬆️", key=f"fb_up_{qid}", help="Naikan urutan", disabled=idx == 0):
-                        questions[idx], questions[idx-1] = questions[idx-1], questions[idx]
-                        st.session_state.fb_dirty = True
-                        st.rerun()
-                with row_ctrl[1]:
-                    if st.button("⬇️", key=f"fb_dn_{qid}", help="Turunkan urutan", disabled=idx == len(questions)-1):
-                        questions[idx], questions[idx+1] = questions[idx+1], questions[idx]
-                        st.session_state.fb_dirty = True
-                        st.rerun()
-                with row_ctrl[2]:
-                    vis_label = "👁️ Tampil" if q.get("visible", True) else "🙈 Disembunyikan"
-                    if st.button(vis_label, key=f"fb_vis_{qid}"):
-                        q["visible"] = not q.get("visible", True)
-                        st.session_state.fb_dirty = True
-                        st.rerun()
-                with row_ctrl[3]:
-                    req_label = "✅ Wajib" if q.get("required") else "❌ Tidak Wajib"
-                    if st.button(req_label, key=f"fb_req_{qid}"):
-                        q["required"] = not q.get("required", False)
-                        st.session_state.fb_dirty = True
-                        st.rerun()
-                with row_ctrl[4]:
-                    if st.button("🗑️ Hapus", key=f"fb_del_{qid}", type="secondary"):
-                        to_delete = idx
-
-                st.divider()
-
-                # ── Field konfigurasi ────────────────────────────────────────
-                c1, c2 = st.columns(2)
-                with c1:
-                    new_label = st.text_input("Label Pertanyaan", value=q["label"], key=f"fb_label_{qid}")
-                    if new_label != q["label"]:
-                        q["label"] = new_label
-                        st.session_state.fb_dirty = True
-
-                with c2:
-                    new_section = st.text_input("Nama Seksi (grup)", value=q.get("section", ""), key=f"fb_sec_{qid}",
-                                                 placeholder="cth: Data Tambahan")
-                    if new_section != q.get("section", ""):
-                        q["section"] = new_section
-                        st.session_state.fb_dirty = True
-
-                new_type_sel = st.selectbox(
-                    "Tipe Jawaban",
-                    options=list(TYPE_LABELS.keys()),
-                    index=list(TYPE_LABELS.keys()).index(qtype) if qtype in TYPE_LABELS else 0,
-                    format_func=lambda x: f"{TYPE_ICONS.get(x,'')} {TYPE_LABELS.get(x,x)}",
-                    key=f"fb_type_{qid}",
-                )
-                if new_type_sel != qtype:
-                    q["type"] = new_type_sel
-                    st.session_state.fb_dirty = True
+            with col_reload:
+                st.write("")
+                if st.button("🔄 Reload", key="fb_reload", use_container_width=True):
+                    load_form_config.clear()
+                    st.session_state.fb_questions = load_form_config()
+                    st.session_state.fb_dirty = False
                     st.rerun()
 
-                new_desc = st.text_input(
-                    "Deskripsi / Instruksi (opsional)",
-                    value=q.get("description", ""),
-                    key=f"fb_desc_{qid}",
-                    placeholder="Teks kecil di bawah label pertanyaan",
+            with col_save:
+                st.write("")
+                save_btn = st.button(
+                    "💾 Simpan Semua",
+                    key="fb_save",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not st.session_state.fb_dirty,
                 )
-                if new_desc != q.get("description", ""):
-                    q["description"] = new_desc
-                    st.session_state.fb_dirty = True
 
-                # Placeholder (untuk text / textarea / number)
-                if qtype in ("text", "textarea", "number"):
-                    new_ph = st.text_input(
-                        "Placeholder",
-                        value=q.get("placeholder", ""),
-                        key=f"fb_ph_{qid}",
-                    )
-                    if new_ph != q.get("placeholder", ""):
-                        q["placeholder"] = new_ph
-                        st.session_state.fb_dirty = True
+            if st.button("➕ Tambah Pertanyaan", key="fb_add", use_container_width=False):
+                new_q = {
+                    "question_id": str(uuid.uuid4())[:8],
+                    "order": len(questions) + 1,
+                    "section": "",
+                    "label": "Pertanyaan Baru",
+                    "type": new_type[0],
+                    "required": False,
+                    "options": [],
+                    "placeholder": "",
+                    "description": "",
+                    "min_value": "",
+                    "max_value": "",
+                    "allow_other": False,
+                    "visible": True,
+                }
+                st.session_state.fb_questions.append(new_q)
+                st.session_state.fb_dirty = True
+                st.rerun()
 
-                # Min/Max (number, scale)
-                if qtype in ("number", "scale"):
-                    mc1, mc2 = st.columns(2)
-                    with mc1:
-                        new_min = st.text_input("Nilai Minimum", value=str(q.get("min_value", "")), key=f"fb_min_{qid}")
-                        if new_min != str(q.get("min_value", "")):
-                            q["min_value"] = new_min
+            if st.session_state.fb_dirty:
+                st.info("⚠️ Ada perubahan yang belum disimpan. Klik **Simpan Semua** untuk menyimpan ke Google Sheets.")
+
+            st.divider()
+
+            # ── Daftar Pertanyaan ─────────────────────────────────────────────────
+            TYPE_LABELS = {
+                "text":     "Jawaban Singkat",
+                "textarea": "Paragraf",
+                "number":   "Angka",
+                "date":     "Tanggal",
+                "time":     "Waktu",
+                "dropdown": "Dropdown",
+                "radio":    "Pilihan Ganda",
+                "checkbox": "Kotak Centang",
+                "scale":    "Skala / Rating",
+                "yes_no":   "Ya / Tidak",
+                "photo":    "Upload Foto",
+            }
+
+            TYPE_ICONS = {
+                "text":     "📝",
+                "textarea": "📄",
+                "number":   "🔢",
+                "date":     "📅",
+                "time":     "🕐",
+                "dropdown": "▼",
+                "radio":    "⭕",
+                "checkbox": "☑️",
+                "scale":    "⭐",
+                "yes_no":   "✅",
+                "photo":    "📷",
+            }
+
+            if not questions:
+                st.markdown(
+                    """
+                    <div style="text-align:center;padding:40px;color:#888;border:2px dashed #ddd;border-radius:12px;margin:20px 0">
+                        <div style="font-size:48px;margin-bottom:12px">📋</div>
+                        <div style="font-size:16px">Belum ada pertanyaan tambahan.</div>
+                        <div style="font-size:13px;margin-top:8px">Klik <b>Tambah Pertanyaan</b> untuk memulai.</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            to_delete = None
+
+            for idx, q in enumerate(questions):
+                qid   = q["question_id"]
+                qtype = q["type"]
+                icon  = TYPE_ICONS.get(qtype, "📝")
+                tlabel = TYPE_LABELS.get(qtype, qtype)
+                visible_marker = "" if q.get("visible", True) else " 🚫"
+                required_marker = " *" if q.get("required") else ""
+
+                with st.expander(
+                    f"{icon} {idx+1}. {q['label']}{required_marker}{visible_marker}   —   *{tlabel}*",
+                    expanded=False,
+                ):
+                    # ── Baris kontrol atas ───────────────────────────────────────
+                    row_ctrl = st.columns([1, 1, 1, 1, 1])
+                    with row_ctrl[0]:
+                        if st.button("⬆️", key=f"fb_up_{qid}", help="Naikan urutan", disabled=idx == 0):
+                            questions[idx], questions[idx-1] = questions[idx-1], questions[idx]
                             st.session_state.fb_dirty = True
-                    with mc2:
-                        new_max = st.text_input("Nilai Maksimum", value=str(q.get("max_value", "")), key=f"fb_max_{qid}")
-                        if new_max != str(q.get("max_value", "")):
-                            q["max_value"] = new_max
+                            st.rerun()
+                    with row_ctrl[1]:
+                        if st.button("⬇️", key=f"fb_dn_{qid}", help="Turunkan urutan", disabled=idx == len(questions)-1):
+                            questions[idx], questions[idx+1] = questions[idx+1], questions[idx]
+                            st.session_state.fb_dirty = True
+                            st.rerun()
+                    with row_ctrl[2]:
+                        vis_label = "👁️ Tampil" if q.get("visible", True) else "🙈 Disembunyikan"
+                        if st.button(vis_label, key=f"fb_vis_{qid}"):
+                            q["visible"] = not q.get("visible", True)
+                            st.session_state.fb_dirty = True
+                            st.rerun()
+                    with row_ctrl[3]:
+                        req_label = "✅ Wajib" if q.get("required") else "❌ Tidak Wajib"
+                        if st.button(req_label, key=f"fb_req_{qid}"):
+                            q["required"] = not q.get("required", False)
+                            st.session_state.fb_dirty = True
+                            st.rerun()
+                    with row_ctrl[4]:
+                        if st.button("🗑️ Hapus", key=f"fb_del_{qid}", type="secondary"):
+                            to_delete = idx
+
+                    st.divider()
+
+                    # ── Field konfigurasi ────────────────────────────────────────
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        new_label = st.text_input("Label Pertanyaan", value=q["label"], key=f"fb_label_{qid}")
+                        if new_label != q["label"]:
+                            q["label"] = new_label
                             st.session_state.fb_dirty = True
 
-                # Options (dropdown, radio, checkbox)
-                if qtype in ("dropdown", "radio", "checkbox"):
-                    st.markdown("**Pilihan Jawaban** (satu per baris)")
-                    current_opts = "\n".join(q.get("options", []))
-                    new_opts_raw = st.text_area(
-                        "Pilihan (satu per baris)",
-                        value=current_opts,
-                        key=f"fb_opts_{qid}",
-                        height=120,
-                        label_visibility="collapsed",
+                    with c2:
+                        new_section = st.text_input("Nama Seksi (grup)", value=q.get("section", ""), key=f"fb_sec_{qid}",
+                                                     placeholder="cth: Data Tambahan")
+                        if new_section != q.get("section", ""):
+                            q["section"] = new_section
+                            st.session_state.fb_dirty = True
+
+                    new_type_sel = st.selectbox(
+                        "Tipe Jawaban",
+                        options=list(TYPE_LABELS.keys()),
+                        index=list(TYPE_LABELS.keys()).index(qtype) if qtype in TYPE_LABELS else 0,
+                        format_func=lambda x: f"{TYPE_ICONS.get(x,'')} {TYPE_LABELS.get(x,x)}",
+                        key=f"fb_type_{qid}",
                     )
-                    new_opts = [o.strip() for o in new_opts_raw.splitlines() if o.strip()]
-                    if new_opts != q.get("options", []):
-                        q["options"] = new_opts
+                    if new_type_sel != qtype:
+                        q["type"] = new_type_sel
+                        st.session_state.fb_dirty = True
+                        st.rerun()
+
+                    new_desc = st.text_input(
+                        "Deskripsi / Instruksi (opsional)",
+                        value=q.get("description", ""),
+                        key=f"fb_desc_{qid}",
+                        placeholder="Teks kecil di bawah label pertanyaan",
+                    )
+                    if new_desc != q.get("description", ""):
+                        q["description"] = new_desc
                         st.session_state.fb_dirty = True
 
-                    allow_other = st.checkbox(
-                        "Izinkan jawaban 'Lainnya...' (input bebas)",
-                        value=q.get("allow_other", False),
-                        key=f"fb_other_{qid}",
-                    )
-                    if allow_other != q.get("allow_other", False):
-                        q["allow_other"] = allow_other
-                        st.session_state.fb_dirty = True
+                    # Placeholder (untuk text / textarea / number)
+                    if qtype in ("text", "textarea", "number"):
+                        new_ph = st.text_input(
+                            "Placeholder",
+                            value=q.get("placeholder", ""),
+                            key=f"fb_ph_{qid}",
+                        )
+                        if new_ph != q.get("placeholder", ""):
+                            q["placeholder"] = new_ph
+                            st.session_state.fb_dirty = True
 
-                # Preview
-                st.markdown("---")
-                st.caption("👀 **Preview pertanyaan:**")
-                preview_label = q["label"] + (" **(wajib)**" if q.get("required") else " *(opsional)*")
-                if q.get("description"):
-                    st.caption(q["description"])
+                    # Min/Max (number, scale)
+                    if qtype in ("number", "scale"):
+                        mc1, mc2 = st.columns(2)
+                        with mc1:
+                            new_min = st.text_input("Nilai Minimum", value=str(q.get("min_value", "")), key=f"fb_min_{qid}")
+                            if new_min != str(q.get("min_value", "")):
+                                q["min_value"] = new_min
+                                st.session_state.fb_dirty = True
+                        with mc2:
+                            new_max = st.text_input("Nilai Maksimum", value=str(q.get("max_value", "")), key=f"fb_max_{qid}")
+                            if new_max != str(q.get("max_value", "")):
+                                q["max_value"] = new_max
+                                st.session_state.fb_dirty = True
 
-                with st.container():
-                    if qtype == "text":
-                        st.text_input(preview_label, disabled=True, placeholder=q.get("placeholder", ""), key=f"prev_{qid}")
-                    elif qtype == "textarea":
-                        st.text_area(preview_label, disabled=True, placeholder=q.get("placeholder", ""), key=f"prev_{qid}")
-                    elif qtype == "number":
-                        st.number_input(preview_label, disabled=True, key=f"prev_{qid}")
-                    elif qtype == "date":
-                        st.date_input(preview_label, disabled=True, key=f"prev_{qid}")
-                    elif qtype == "time":
-                        st.time_input(preview_label, disabled=True, key=f"prev_{qid}")
-                    elif qtype == "dropdown":
-                        opts_prev = ["— Pilih —"] + q.get("options", [])
-                        if q.get("allow_other"):
-                            opts_prev.append("Lainnya...")
-                        st.selectbox(preview_label, opts_prev, disabled=True, key=f"prev_{qid}")
-                    elif qtype == "radio":
-                        opts_prev = q.get("options", [])
-                        if q.get("allow_other"):
-                            opts_prev = opts_prev + ["Lainnya..."]
-                        st.radio(preview_label, opts_prev or ["(belum ada pilihan)"], disabled=True, key=f"prev_{qid}", horizontal=True)
-                    elif qtype == "checkbox":
-                        st.markdown(f"**{preview_label}**")
-                        for opt in (q.get("options", []) or ["(belum ada pilihan)"]):
-                            st.checkbox(opt, disabled=True, key=f"prev_{qid}_{opt}")
-                    elif qtype == "scale":
-                        min_v = int(q.get("min_value") or 1)
-                        max_v = int(q.get("max_value") or 5)
-                        st.slider(preview_label, min_value=min_v, max_value=max_v, disabled=True, key=f"prev_{qid}")
-                    elif qtype == "yes_no":
-                        st.toggle(preview_label, disabled=True, key=f"prev_{qid}")
-                    elif qtype == "photo":
-                        st.file_uploader(preview_label, type=["jpg","jpeg","png"], disabled=True, key=f"prev_{qid}")
+                    # Options (dropdown, radio, checkbox)
+                    if qtype in ("dropdown", "radio", "checkbox"):
+                        st.markdown("**Pilihan Jawaban** (satu per baris)")
+                        current_opts = "\n".join(q.get("options", []))
+                        new_opts_raw = st.text_area(
+                            "Pilihan (satu per baris)",
+                            value=current_opts,
+                            key=f"fb_opts_{qid}",
+                            height=120,
+                            label_visibility="collapsed",
+                        )
+                        new_opts = [o.strip() for o in new_opts_raw.splitlines() if o.strip()]
+                        if new_opts != q.get("options", []):
+                            q["options"] = new_opts
+                            st.session_state.fb_dirty = True
 
-        # Hapus setelah iterasi
-        if to_delete is not None:
-            st.session_state.fb_questions.pop(to_delete)
-            st.session_state.fb_dirty = True
-            st.rerun()
+                        allow_other = st.checkbox(
+                            "Izinkan jawaban 'Lainnya...' (input bebas)",
+                            value=q.get("allow_other", False),
+                            key=f"fb_other_{qid}",
+                        )
+                        if allow_other != q.get("allow_other", False):
+                            q["allow_other"] = allow_other
+                            st.session_state.fb_dirty = True
 
-        # Simpan
-        if save_btn:
-            with st.spinner("Menyimpan konfigurasi form ke Google Sheets..."):
-                save_form_config(st.session_state.fb_questions)
-                st.session_state.fb_dirty = False
-            st.success("✅ Konfigurasi form berhasil disimpan!")
-            time.sleep(1)
-            st.rerun()
+                    # Preview
+                    st.markdown("---")
+                    st.caption("👀 **Preview pertanyaan:**")
+                    preview_label = q["label"] + (" **(wajib)**" if q.get("required") else " *(opsional)*")
+                    if q.get("description"):
+                        st.caption(q["description"])
+
+                    with st.container():
+                        if qtype == "text":
+                            st.text_input(preview_label, disabled=True, placeholder=q.get("placeholder", ""), key=f"prev_{qid}")
+                        elif qtype == "textarea":
+                            st.text_area(preview_label, disabled=True, placeholder=q.get("placeholder", ""), key=f"prev_{qid}")
+                        elif qtype == "number":
+                            st.number_input(preview_label, disabled=True, key=f"prev_{qid}")
+                        elif qtype == "date":
+                            st.date_input(preview_label, disabled=True, key=f"prev_{qid}")
+                        elif qtype == "time":
+                            st.time_input(preview_label, disabled=True, key=f"prev_{qid}")
+                        elif qtype == "dropdown":
+                            opts_prev = ["— Pilih —"] + q.get("options", [])
+                            if q.get("allow_other"):
+                                opts_prev.append("Lainnya...")
+                            st.selectbox(preview_label, opts_prev, disabled=True, key=f"prev_{qid}")
+                        elif qtype == "radio":
+                            opts_prev = q.get("options", [])
+                            if q.get("allow_other"):
+                                opts_prev = opts_prev + ["Lainnya..."]
+                            st.radio(preview_label, opts_prev or ["(belum ada pilihan)"], disabled=True, key=f"prev_{qid}", horizontal=True)
+                        elif qtype == "checkbox":
+                            st.markdown(f"**{preview_label}**")
+                            for opt in (q.get("options", []) or ["(belum ada pilihan)"]):
+                                st.checkbox(opt, disabled=True, key=f"prev_{qid}_{opt}")
+                        elif qtype == "scale":
+                            min_v = int(q.get("min_value") or 1)
+                            max_v = int(q.get("max_value") or 5)
+                            st.slider(preview_label, min_value=min_v, max_value=max_v, disabled=True, key=f"prev_{qid}")
+                        elif qtype == "yes_no":
+                            st.toggle(preview_label, disabled=True, key=f"prev_{qid}")
+                        elif qtype == "photo":
+                            st.file_uploader(preview_label, type=["jpg","jpeg","png"], disabled=True, key=f"prev_{qid}")
+
+            # Hapus setelah iterasi
+            if to_delete is not None:
+                st.session_state.fb_questions.pop(to_delete)
+                st.session_state.fb_dirty = True
+                st.rerun()
+
+            # Simpan
+            if save_btn:
+                with st.spinner("Menyimpan konfigurasi form ke Google Sheets..."):
+                    save_form_config(st.session_state.fb_questions)
+                    st.session_state.fb_dirty = False
+                st.success("✅ Konfigurasi form berhasil disimpan!")
+                time.sleep(1)
+                st.rerun()
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 3: PENGATURAN
@@ -1247,3 +1566,111 @@ elif page == "Monitoring (Admin)":
             st.markdown(f"- **Customer Sheet ID:** `{CUSTOMER_SHEET_ID}`")
             st.markdown(f"- **Submission Sheet ID:** `{SUBMISSION_SHEET_ID}`")
             st.markdown(f"- **Form Builder Tab:** `{FORM_CONFIG_TAB}`")
+
+        st.divider()
+
+        # ── Spreadsheet Manager ───────────────────────────────────────────────
+        st.markdown("### 🗂️ Spreadsheet Manager")
+        st.caption(
+            "Daftarkan beberapa Spreadsheet dan pilih mana yang aktif. "
+            "Submission & data customer akan menggunakan spreadsheet yang ditandai **Aktif**."
+        )
+
+        if "sm_sheets" not in st.session_state:
+            st.session_state.sm_sheets = load_spreadsheet_list()
+        if "sm_dirty" not in st.session_state:
+            st.session_state.sm_dirty = False
+
+        sm_sheets = st.session_state.sm_sheets
+
+        # Tampilkan default (dari konstanta) jika list kosong
+        active_sub, active_cus = get_active_sheet_ids()
+        st.info(
+            f"**Spreadsheet aktif saat ini:**\n\n"
+            f"- Submission: `{active_sub}`\n"
+            f"- Customer: `{active_cus}`"
+        )
+
+        col_sm_add, col_sm_save = st.columns([2, 1])
+        with col_sm_add:
+            if st.button("➕ Tambah Spreadsheet", key="sm_add"):
+                sm_sheets.append({
+                    "name": "Spreadsheet Baru",
+                    "submission_id": "",
+                    "customer_id": "",
+                    "active": False,
+                    "description": "",
+                })
+                st.session_state.sm_dirty = True
+                st.rerun()
+        with col_sm_save:
+            sm_save_btn = st.button(
+                "💾 Simpan", key="sm_save", type="primary",
+                disabled=not st.session_state.sm_dirty,
+            )
+
+        if st.session_state.sm_dirty:
+            st.warning("Ada perubahan belum disimpan.")
+
+        to_del_sm = None
+        for si, ss in enumerate(sm_sheets):
+            active_badge = " 🟢 **AKTIF**" if ss.get("active") else ""
+            with st.expander(f"📋 {ss.get('name','Tanpa Nama')}{active_badge}", expanded=False):
+                new_name = st.text_input("Nama", value=ss.get("name",""), key=f"sm_name_{si}")
+                if new_name != ss.get("name",""):
+                    ss["name"] = new_name; st.session_state.sm_dirty = True
+
+                new_desc = st.text_input("Keterangan (opsional)", value=ss.get("description",""), key=f"sm_desc_{si}")
+                if new_desc != ss.get("description",""):
+                    ss["description"] = new_desc; st.session_state.sm_dirty = True
+
+                new_sub = st.text_input(
+                    "Submission Spreadsheet ID",
+                    value=ss.get("submission_id",""),
+                    key=f"sm_sub_{si}",
+                    placeholder="cth: 1RC7v1fGmcz-9q4Vow...",
+                    help="Salin dari URL Google Sheets: docs.google.com/spreadsheets/d/**ID**/edit",
+                )
+                if new_sub != ss.get("submission_id",""):
+                    ss["submission_id"] = new_sub; st.session_state.sm_dirty = True
+
+                new_cus = st.text_input(
+                    "Customer Spreadsheet ID",
+                    value=ss.get("customer_id",""),
+                    key=f"sm_cus_{si}",
+                    placeholder="cth: 113E5fKvZ0wWlo... (kosongkan = gunakan default)",
+                )
+                if new_cus != ss.get("customer_id",""):
+                    ss["customer_id"] = new_cus; st.session_state.sm_dirty = True
+
+                row_sm = st.columns([2, 1])
+                with row_sm[0]:
+                    if not ss.get("active"):
+                        if st.button("🟢 Jadikan Aktif", key=f"sm_activate_{si}", type="primary"):
+                            for other in sm_sheets:
+                                other["active"] = False
+                            ss["active"] = True
+                            st.session_state.sm_dirty = True
+                            st.rerun()
+                    else:
+                        if st.button("⬜ Nonaktifkan", key=f"sm_deactivate_{si}"):
+                            ss["active"] = False
+                            st.session_state.sm_dirty = True
+                            st.rerun()
+                with row_sm[1]:
+                    if st.button("🗑️ Hapus", key=f"sm_del_{si}"):
+                        to_del_sm = si
+
+        if to_del_sm is not None:
+            sm_sheets.pop(to_del_sm)
+            st.session_state.sm_dirty = True
+            st.rerun()
+
+        if sm_save_btn:
+            with st.spinner("Menyimpan daftar spreadsheet..."):
+                save_spreadsheet_list(sm_sheets)
+                st.cache_data.clear()
+                st.session_state.sm_dirty = False
+            st.success("✅ Daftar spreadsheet disimpan. Cache di-refresh.")
+            time.sleep(1)
+            st.rerun()
