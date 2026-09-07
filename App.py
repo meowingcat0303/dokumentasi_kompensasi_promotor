@@ -27,8 +27,11 @@ JENIS_OPTIONS    = ["SNT", "Thinplate", "PNT 3D", "Shopsign"]
 BRAND_OPTIONS    = ["EVO", "ARJA", "Wismilak Kretek"]
 ACTIVITY_OPTIONS = ["Termin 1", "Termin 2"]
 
-TERMIN_MONTHS = 6          # jarak antar termin / durasi kontrak setelah termin 2
-REMINDER_DAYS = 21         # highlight kuning jika sisa <= hari ini
+TERMIN_MONTHS = 6
+REMINDER_DAYS = 21
+
+# ── Form Builder Tab di Google Sheets ─────────────────────────────────────────
+FORM_CONFIG_TAB = "Config_FormBuilder"
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -125,6 +128,96 @@ def load_submissions() -> pd.DataFrame:
         st.warning(f"Gagal memuat submission: {e}")
         return pd.DataFrame()
 
+# ── Form Builder: Load & Save ke Google Sheets ────────────────────────────────
+def ensure_form_config_tab():
+    """Pastikan tab Config_FormBuilder ada, buat kalau belum ada."""
+    gc = get_gspread()
+    wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+    try:
+        ws = wb.worksheet(FORM_CONFIG_TAB)
+    except Exception:
+        ws = wb.add_worksheet(title=FORM_CONFIG_TAB, rows=200, cols=20)
+        # Header
+        headers = [
+            "question_id", "order", "section", "label", "type",
+            "required", "options", "placeholder", "description",
+            "min_value", "max_value", "allow_other", "visible",
+        ]
+        ws.update([headers], "A1")
+    return ws
+
+@st.cache_data(ttl=30)
+def load_form_config() -> list:
+    """Load konfigurasi pertanyaan dari Google Sheets."""
+    try:
+        gc = get_gspread()
+        wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+        try:
+            ws = wb.worksheet(FORM_CONFIG_TAB)
+        except Exception:
+            return []
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        headers = rows[0]
+        questions = []
+        for r in rows[1:]:
+            if not any(r):
+                continue
+            row_dict = dict(zip(headers, r + [""] * (len(headers) - len(r))))
+            q = {
+                "question_id": row_dict.get("question_id", str(uuid.uuid4())[:8]),
+                "order": int(row_dict.get("order", 0)),
+                "section": row_dict.get("section", ""),
+                "label": row_dict.get("label", ""),
+                "type": row_dict.get("type", "text"),
+                "required": row_dict.get("required", "false").lower() == "true",
+                "options": [o.strip() for o in row_dict.get("options", "").split("|") if o.strip()],
+                "placeholder": row_dict.get("placeholder", ""),
+                "description": row_dict.get("description", ""),
+                "min_value": row_dict.get("min_value", ""),
+                "max_value": row_dict.get("max_value", ""),
+                "allow_other": row_dict.get("allow_other", "false").lower() == "true",
+                "visible": row_dict.get("visible", "true").lower() != "false",
+            }
+            questions.append(q)
+        questions.sort(key=lambda x: x["order"])
+        return questions
+    except Exception as e:
+        st.warning(f"Gagal load form config: {e}")
+        return []
+
+def save_form_config(questions: list):
+    """Simpan semua pertanyaan ke Google Sheets."""
+    gc = get_gspread()
+    ws = ensure_form_config_tab()
+    headers = [
+        "question_id", "order", "section", "label", "type",
+        "required", "options", "placeholder", "description",
+        "min_value", "max_value", "allow_other", "visible",
+    ]
+    rows = [headers]
+    for i, q in enumerate(questions):
+        row = [
+            q.get("question_id", str(uuid.uuid4())[:8]),
+            str(i + 1),
+            q.get("section", ""),
+            q.get("label", ""),
+            q.get("type", "text"),
+            str(q.get("required", False)).lower(),
+            "|".join(q.get("options", [])),
+            q.get("placeholder", ""),
+            q.get("description", ""),
+            str(q.get("min_value", "")),
+            str(q.get("max_value", "")),
+            str(q.get("allow_other", False)).lower(),
+            str(q.get("visible", True)).lower(),
+        ]
+        rows.append(row)
+    ws.clear()
+    ws.update(rows, "A1")
+    load_form_config.clear()
+
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
     img = Image.open(uploaded_file)
@@ -189,7 +282,6 @@ def compute_deadline(date_str: str, activity: str) -> datetime.date | None:
         return None
 
 def countdown_label(deadline: datetime.date, today: datetime.date) -> tuple[str, bool]:
-    """Returns (label, is_warning)."""
     delta = (deadline - today).days
     if delta < 0:
         return f"Lewat {abs(delta)} hari", True
@@ -404,6 +496,97 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
     foto_kompens  = st.file_uploader("Foto Bukti Kompensasi *",  type=["jpg","jpeg","png"], key="foto_kompens")
     st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%) sebelum diupload.")
 
+    # ── Pertanyaan Tambahan dari Form Builder ──────────────────────────────────
+    extra_questions = load_form_config()
+    extra_answers   = {}
+
+    visible_questions = [q for q in extra_questions if q.get("visible", True)]
+
+    if visible_questions:
+        # Kelompokkan per section
+        sections = {}
+        for q in visible_questions:
+            sec = q.get("section", "") or "Pertanyaan Tambahan"
+            sections.setdefault(sec, []).append(q)
+
+        for sec_name, qs in sections.items():
+            st.divider()
+            st.subheader(sec_name)
+            for q in qs:
+                qid   = q["question_id"]
+                label = q["label"] + (" *" if q["required"] else " (opsional)")
+                desc  = q.get("description", "")
+                if desc:
+                    st.caption(desc)
+
+                qtype = q["type"]
+
+                if qtype == "text":
+                    extra_answers[qid] = st.text_input(
+                        label, placeholder=q.get("placeholder", ""), key=f"eq_{qid}"
+                    )
+
+                elif qtype == "textarea":
+                    extra_answers[qid] = st.text_area(
+                        label, placeholder=q.get("placeholder", ""), key=f"eq_{qid}"
+                    )
+
+                elif qtype == "number":
+                    min_v = float(q["min_value"]) if q.get("min_value") else None
+                    max_v = float(q["max_value"]) if q.get("max_value") else None
+                    extra_answers[qid] = st.number_input(
+                        label, min_value=min_v, max_value=max_v, key=f"eq_{qid}"
+                    )
+
+                elif qtype == "date":
+                    extra_answers[qid] = str(st.date_input(label, key=f"eq_{qid}"))
+
+                elif qtype == "dropdown":
+                    opts = ["— Pilih —"] + q.get("options", [])
+                    if q.get("allow_other"):
+                        opts.append("Lainnya...")
+                    sel = st.selectbox(label, opts, key=f"eq_{qid}")
+                    if sel == "Lainnya...":
+                        sel = st.text_input("Sebutkan:", key=f"eq_{qid}_other")
+                    extra_answers[qid] = sel if sel != "— Pilih —" else ""
+
+                elif qtype == "radio":
+                    opts = q.get("options", [])
+                    if q.get("allow_other"):
+                        opts = opts + ["Lainnya..."]
+                    sel = st.radio(label, opts, key=f"eq_{qid}", horizontal=True)
+                    if sel == "Lainnya...":
+                        sel = st.text_input("Sebutkan:", key=f"eq_{qid}_other")
+                    extra_answers[qid] = sel or ""
+
+                elif qtype == "checkbox":
+                    opts = q.get("options", [])
+                    selected = []
+                    st.markdown(f"**{label}**")
+                    for opt in opts:
+                        if st.checkbox(opt, key=f"eq_{qid}_{opt}"):
+                            selected.append(opt)
+                    if q.get("allow_other"):
+                        other_val = st.text_input("Lainnya:", key=f"eq_{qid}_other")
+                        if other_val:
+                            selected.append(other_val)
+                    extra_answers[qid] = ", ".join(selected)
+
+                elif qtype == "scale":
+                    min_v = int(q["min_value"]) if q.get("min_value") else 1
+                    max_v = int(q["max_value"]) if q.get("max_value") else 5
+                    extra_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"eq_{qid}"))
+
+                elif qtype == "photo":
+                    uploaded = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"eq_{qid}")
+                    extra_answers[qid] = uploaded  # handled at submit
+
+                elif qtype == "time":
+                    extra_answers[qid] = str(st.time_input(label, key=f"eq_{qid}"))
+
+                elif qtype == "yes_no":
+                    extra_answers[qid] = "Ya" if st.toggle(label, key=f"eq_{qid}") else "Tidak"
+
     catatan = st.text_area("Catatan Tambahan (opsional)", key="catatan_input")
     st.divider()
 
@@ -421,6 +604,17 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
         if not foto_ktp:             errors.append("Foto KTP wajib diupload")
         if not foto_sunblind:        errors.append("Foto Sunblind wajib diupload")
         if not foto_kompens:         errors.append("Foto Bukti Kompensasi wajib diupload")
+
+        # Validasi pertanyaan tambahan yang wajib
+        for q in visible_questions:
+            if q["required"]:
+                qid = q["question_id"]
+                val = extra_answers.get(qid, "")
+                if q["type"] == "photo":
+                    if val is None:
+                        errors.append(f"'{q['label']}' wajib diisi")
+                elif not val or val == "— Pilih —":
+                    errors.append(f"'{q['label']}' wajib diisi")
 
         if errors:
             for e in errors:
@@ -443,9 +637,21 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                 url_display  = safe_upload(foto_display,  "display")
                 url_kompens  = safe_upload(foto_kompens,  "kompensasi")
 
+                # Upload foto dari pertanyaan tambahan
+                extra_answers_str = {}
+                for q in visible_questions:
+                    qid = q["question_id"]
+                    val = extra_answers.get(qid, "")
+                    if q["type"] == "photo" and val is not None:
+                        url_extra = safe_upload(val, f"extra_{qid}")
+                        extra_answers_str[qid] = url_extra
+                    else:
+                        extra_answers_str[qid] = str(val) if val else ""
+
                 unique_id   = f"{ts}_{uid}"
                 submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
 
+                # Bangun row: kolom tetap + kolom dinamis dari form builder
                 row = [
                     unique_id,
                     str(tgl),
@@ -466,6 +672,10 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                     catatan,
                     submit_time,
                 ]
+                # Tambahkan jawaban pertanyaan ekstra
+                for q in visible_questions:
+                    row.append(extra_answers_str.get(q["question_id"], ""))
+
                 append_submission(row)
                 st.session_state.submit_info = {
                     "unique_id": unique_id,
@@ -480,13 +690,13 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — MONITORING ADMIN
+# PAGE 2 — MONITORING & ADMIN PANEL
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "Monitoring (Admin)":
 
-    st.title("Monitoring Investment — Admin")
+    st.title("Panel Admin")
 
-    # Login check
+    # ── Login check ───────────────────────────────────────────────────────────
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
 
@@ -501,160 +711,539 @@ elif page == "Monitoring (Admin)":
                 st.error("Password salah.")
         st.stop()
 
-    # Admin content
+    # ── Logout ────────────────────────────────────────────────────────────────
     col_logout, _ = st.columns([1, 4])
     with col_logout:
         if st.button("Keluar", key="btn_logout"):
             st.session_state.admin_authenticated = False
             st.rerun()
 
-    today = datetime.datetime.now(WIB).date()
+    # ── Tab Admin ─────────────────────────────────────────────────────────────
+    tab_monitoring, tab_formbuilder, tab_settings = st.tabs([
+        "📊 Monitoring Submission",
+        "📝 Form Builder",
+        "⚙️ Pengaturan",
+    ])
 
-    with st.spinner("Memuat data..."):
-        df_sub = load_submissions()
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1: MONITORING
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_monitoring:
+        st.subheader("Monitoring Investment")
+        today = datetime.datetime.now(WIB).date()
 
-    if df_sub.empty:
-        st.warning("Belum ada data submission.")
-        st.stop()
+        with st.spinner("Memuat data..."):
+            df_sub = load_submissions()
 
-    # Normalize kolom
-    df_sub.columns = [c.strip() for c in df_sub.columns]
-
-    # ── Filter ────────────────────────────────────────────────────────────────
-    st.subheader("Filter")
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        eksekutor_list = ["Semua"] + sorted(df_sub["Eksekutor"].dropna().unique().tolist()) if "Eksekutor" in df_sub.columns else ["Semua"]
-        filter_eks = st.selectbox("Eksekutor", eksekutor_list, key="filter_eks")
-
-    with col2:
-        activity_list = ["Semua"] + sorted(df_sub["Activity"].dropna().unique().tolist()) if "Activity" in df_sub.columns else ["Semua"]
-        filter_act = st.selectbox("Activity (Termin)", activity_list, key="filter_act")
-
-    with col3:
-        program_list = ["Semua"] + sorted(df_sub["Program Investment"].dropna().unique().tolist()) if "Program Investment" in df_sub.columns else ["Semua"]
-        filter_prog = st.selectbox("Program", program_list, key="filter_prog")
-
-    df_view = df_sub.copy()
-    if filter_eks  != "Semua" and "Eksekutor"         in df_view.columns: df_view = df_view[df_view["Eksekutor"]         == filter_eks]
-    if filter_act  != "Semua" and "Activity"          in df_view.columns: df_view = df_view[df_view["Activity"]          == filter_act]
-    if filter_prog != "Semua" and "Program Investment" in df_view.columns: df_view = df_view[df_view["Program Investment"] == filter_prog]
-
-    st.divider()
-
-    # ── Hitung deadline & countdown ───────────────────────────────────────────
-    def row_deadline_label(row):
-        activity = str(row.get("Activity", "")).strip()
-        date_str = str(row.get("Date", "")).strip()
-        deadline = compute_deadline(date_str, activity)
-        if deadline is None:
-            return "", "", False
-
-        if activity == "Termin 1":
-            label_type = "Jatuh Tempo Termin 2"
+        if df_sub.empty:
+            st.warning("Belum ada data submission.")
         else:
-            label_type = "Kontrak Berakhir"
+            df_sub.columns = [c.strip() for c in df_sub.columns]
 
-        countdown, is_warn = countdown_label(deadline, today)
-        return str(deadline), countdown, is_warn
+            st.subheader("Filter")
+            col1, col2, col3 = st.columns(3)
 
-    deadlines   = []
-    countdowns  = []
-    warnings    = []
-    label_types = []
+            with col1:
+                eksekutor_list = ["Semua"] + sorted(df_sub["Eksekutor"].dropna().unique().tolist()) if "Eksekutor" in df_sub.columns else ["Semua"]
+                filter_eks = st.selectbox("Eksekutor", eksekutor_list, key="filter_eks")
 
-    for _, row in df_view.iterrows():
-        activity = str(row.get("Activity", "")).strip()
-        date_str = str(row.get("Date", "")).strip()
-        deadline = compute_deadline(date_str, activity)
+            with col2:
+                activity_list = ["Semua"] + sorted(df_sub["Activity"].dropna().unique().tolist()) if "Activity" in df_sub.columns else ["Semua"]
+                filter_act = st.selectbox("Activity (Termin)", activity_list, key="filter_act")
 
-        if deadline is None:
-            deadlines.append("")
-            countdowns.append("")
-            warnings.append(False)
-            label_types.append("")
-        else:
-            if activity == "Termin 1":
-                label_types.append("Jatuh Tempo Termin 2")
-            else:
-                label_types.append("Kontrak Berakhir")
+            with col3:
+                program_list = ["Semua"] + sorted(df_sub["Program Investment"].dropna().unique().tolist()) if "Program Investment" in df_sub.columns else ["Semua"]
+                filter_prog = st.selectbox("Program", program_list, key="filter_prog")
 
-            deadlines.append(str(deadline))
-            cd, warn = countdown_label(deadline, today)
-            countdowns.append(cd)
-            warnings.append(warn)
+            df_view = df_sub.copy()
+            if filter_eks  != "Semua" and "Eksekutor"         in df_view.columns: df_view = df_view[df_view["Eksekutor"]         == filter_eks]
+            if filter_act  != "Semua" and "Activity"          in df_view.columns: df_view = df_view[df_view["Activity"]          == filter_act]
+            if filter_prog != "Semua" and "Program Investment" in df_view.columns: df_view = df_view[df_view["Program Investment"] == filter_prog]
 
-    df_view = df_view.copy()
-    df_view["Tipe Deadline"]  = label_types
-    df_view["Tanggal Deadline"] = deadlines
-    df_view["Countdown"]      = countdowns
-    df_view["_warn"]          = warnings
+            st.divider()
 
-    # ── Summary metrics ───────────────────────────────────────────────────────
-    total_rows   = len(df_view)
-    warn_count   = df_view["_warn"].sum()
-    termin1_done = (df_view["Activity"] == "Termin 1").sum() if "Activity" in df_view.columns else 0
-    termin2_done = (df_view["Activity"] == "Termin 2").sum() if "Activity" in df_view.columns else 0
+            deadlines   = []
+            countdowns  = []
+            warnings    = []
+            label_types = []
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Submission", total_rows)
-    c2.metric("Termin 1", termin1_done)
-    c3.metric("Termin 2", termin2_done)
-    c4.metric("Perlu Perhatian", int(warn_count))
+            for _, row in df_view.iterrows():
+                activity = str(row.get("Activity", "")).strip()
+                date_str = str(row.get("Date", "")).strip()
+                deadline = compute_deadline(date_str, activity)
 
-    st.divider()
+                if deadline is None:
+                    deadlines.append("")
+                    countdowns.append("")
+                    warnings.append(False)
+                    label_types.append("")
+                else:
+                    label_types.append("Jatuh Tempo Termin 2" if activity == "Termin 1" else "Kontrak Berakhir")
+                    deadlines.append(str(deadline))
+                    cd, warn = countdown_label(deadline, today)
+                    countdowns.append(cd)
+                    warnings.append(warn)
 
-    # ── Tabel dengan highlight ────────────────────────────────────────────────
-    st.subheader("Detail Submission & Deadline")
+            df_view = df_view.copy()
+            df_view["Tipe Deadline"]    = label_types
+            df_view["Tanggal Deadline"] = deadlines
+            df_view["Countdown"]        = countdowns
+            df_view["_warn"]            = warnings
 
-    display_cols = [c for c in [
-        "Date", "Eksekutor", "Program Investment", "Jenis Investment",
-        "Brand", "Activity", "Rayon", "Zona", "Nama Outlet", "Kode Customer",
-        "Tipe Deadline", "Tanggal Deadline", "Countdown",
-    ] if c in df_view.columns]
+            total_rows   = len(df_view)
+            warn_count   = df_view["_warn"].sum()
+            termin1_done = (df_view["Activity"] == "Termin 1").sum() if "Activity" in df_view.columns else 0
+            termin2_done = (df_view["Activity"] == "Termin 2").sum() if "Activity" in df_view.columns else 0
 
-    df_display = df_view[display_cols + ["_warn"]].copy()
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Submission", total_rows)
+            c2.metric("Termin 1", termin1_done)
+            c3.metric("Termin 2", termin2_done)
+            c4.metric("Perlu Perhatian", int(warn_count))
 
-    def highlight_warn(row):
-        color = "background-color: #fff3cd" if row["_warn"] else ""
-        return [color] * len(row)
+            st.divider()
+            st.subheader("Detail Submission & Deadline")
 
-    styled = (
-        df_display
-        .style
-        .apply(highlight_warn, axis=1)
-        .hide(axis="index")
-    )
+            display_cols = [c for c in [
+                "Date", "Eksekutor", "Program Investment", "Jenis Investment",
+                "Brand", "Activity", "Rayon", "Zona", "Nama Outlet", "Kode Customer",
+                "Tipe Deadline", "Tanggal Deadline", "Countdown",
+            ] if c in df_view.columns]
 
-    # Drop _warn dari display tapi tetap dipakai style
-    st.dataframe(
-        df_view[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Countdown": st.column_config.TextColumn("Countdown", help="Kuning = <= 21 hari atau sudah lewat"),
+            st.dataframe(
+                df_view[display_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Countdown": st.column_config.TextColumn("Countdown", help="Kuning = <= 21 hari atau sudah lewat"),
+                }
+            )
+
+            st.caption("Baris dengan latar kuning = deadline <= 21 hari atau sudah lewat.")
+
+            rows_html = ""
+            for _, row in df_view[display_cols + ["_warn"]].iterrows():
+                bg = ' style="background:#fff3cd"' if row["_warn"] else ""
+                cells = "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{row[c]}</td>" for c in display_cols)
+                rows_html += f"<tr{bg}>{cells}</tr>"
+
+            header_html = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#f0f2f6;text-align:left'>{c}</th>" for c in display_cols)
+
+            table_html = f"""
+            <div style="overflow-x:auto;max-height:600px;overflow-y:auto">
+            <table style="border-collapse:collapse;width:100%;font-size:13px">
+                <thead><tr>{header_html}</tr></thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+            </div>
+            """
+            st.components.v1.html(table_html, height=620, scrolling=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2: FORM BUILDER
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_formbuilder:
+        st.subheader("Form Builder — Pertanyaan Tambahan")
+        st.caption(
+            "Tambahkan, edit, atau hapus pertanyaan yang akan muncul di halaman Input Dokumentasi. "
+            "Mirip seperti Google Form — atur tipe jawaban, wajib/tidak, hingga pilihan."
+        )
+
+        # Inisialisasi session state form builder
+        if "fb_questions" not in st.session_state:
+            with st.spinner("Memuat konfigurasi form..."):
+                st.session_state.fb_questions = load_form_config()
+
+        if "fb_dirty" not in st.session_state:
+            st.session_state.fb_dirty = False
+
+        questions = st.session_state.fb_questions
+
+        # ── Toolbar ───────────────────────────────────────────────────────────
+        col_add, col_reload, col_save = st.columns([2, 1, 1])
+
+        with col_add:
+            new_type = st.selectbox(
+                "Tipe pertanyaan baru:",
+                options=[
+                    ("text",     "Jawaban Singkat"),
+                    ("textarea", "Paragraf"),
+                    ("number",   "Angka"),
+                    ("date",     "Tanggal"),
+                    ("time",     "Waktu"),
+                    ("dropdown", "Dropdown (Pilihan)"),
+                    ("radio",    "Pilihan Ganda"),
+                    ("checkbox", "Kotak Centang"),
+                    ("scale",    "Skala / Rating"),
+                    ("yes_no",   "Ya / Tidak"),
+                    ("photo",    "Upload Foto"),
+                ],
+                format_func=lambda x: x[1],
+                key="fb_new_type",
+            )
+
+        with col_reload:
+            st.write("")
+            if st.button("🔄 Reload", key="fb_reload", use_container_width=True):
+                load_form_config.clear()
+                st.session_state.fb_questions = load_form_config()
+                st.session_state.fb_dirty = False
+                st.rerun()
+
+        with col_save:
+            st.write("")
+            save_btn = st.button(
+                "💾 Simpan Semua",
+                key="fb_save",
+                type="primary",
+                use_container_width=True,
+                disabled=not st.session_state.fb_dirty,
+            )
+
+        if st.button("➕ Tambah Pertanyaan", key="fb_add", use_container_width=False):
+            new_q = {
+                "question_id": str(uuid.uuid4())[:8],
+                "order": len(questions) + 1,
+                "section": "",
+                "label": "Pertanyaan Baru",
+                "type": new_type[0],
+                "required": False,
+                "options": [],
+                "placeholder": "",
+                "description": "",
+                "min_value": "",
+                "max_value": "",
+                "allow_other": False,
+                "visible": True,
+            }
+            st.session_state.fb_questions.append(new_q)
+            st.session_state.fb_dirty = True
+            st.rerun()
+
+        if st.session_state.fb_dirty:
+            st.info("⚠️ Ada perubahan yang belum disimpan. Klik **Simpan Semua** untuk menyimpan ke Google Sheets.")
+
+        st.divider()
+
+        # ── Daftar Pertanyaan ─────────────────────────────────────────────────
+        TYPE_LABELS = {
+            "text":     "Jawaban Singkat",
+            "textarea": "Paragraf",
+            "number":   "Angka",
+            "date":     "Tanggal",
+            "time":     "Waktu",
+            "dropdown": "Dropdown",
+            "radio":    "Pilihan Ganda",
+            "checkbox": "Kotak Centang",
+            "scale":    "Skala / Rating",
+            "yes_no":   "Ya / Tidak",
+            "photo":    "Upload Foto",
         }
-    )
 
-    # Highlight manual via tabel HTML karena st.dataframe tidak support row color
-    st.caption("Baris dengan latar kuning = deadline <= 21 hari atau sudah lewat.")
+        TYPE_ICONS = {
+            "text":     "📝",
+            "textarea": "📄",
+            "number":   "🔢",
+            "date":     "📅",
+            "time":     "🕐",
+            "dropdown": "▼",
+            "radio":    "⭕",
+            "checkbox": "☑️",
+            "scale":    "⭐",
+            "yes_no":   "✅",
+            "photo":    "📷",
+        }
 
-    # Render tabel HTML dengan highlight
-    rows_html = ""
-    for _, row in df_view[display_cols + ["_warn"]].iterrows():
-        bg = ' style="background:#fff3cd"' if row["_warn"] else ""
-        cells = "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{row[c]}</td>" for c in display_cols)
-        rows_html += f"<tr{bg}>{cells}</tr>"
+        if not questions:
+            st.markdown(
+                """
+                <div style="text-align:center;padding:40px;color:#888;border:2px dashed #ddd;border-radius:12px;margin:20px 0">
+                    <div style="font-size:48px;margin-bottom:12px">📋</div>
+                    <div style="font-size:16px">Belum ada pertanyaan tambahan.</div>
+                    <div style="font-size:13px;margin-top:8px">Klik <b>Tambah Pertanyaan</b> untuk memulai.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    header_html = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#f0f2f6;text-align:left'>{c}</th>" for c in display_cols)
+        to_delete = None
 
-    table_html = f"""
-    <div style="overflow-x:auto;max-height:600px;overflow-y:auto">
-    <table style="border-collapse:collapse;width:100%;font-size:13px">
-        <thead><tr>{header_html}</tr></thead>
-        <tbody>{rows_html}</tbody>
-    </table>
-    </div>
-    """
-    st.components.v1.html(table_html, height=620, scrolling=True)
+        for idx, q in enumerate(questions):
+            qid   = q["question_id"]
+            qtype = q["type"]
+            icon  = TYPE_ICONS.get(qtype, "📝")
+            tlabel = TYPE_LABELS.get(qtype, qtype)
+            visible_marker = "" if q.get("visible", True) else " 🚫"
+            required_marker = " *" if q.get("required") else ""
+
+            with st.expander(
+                f"{icon} {idx+1}. {q['label']}{required_marker}{visible_marker}   —   *{tlabel}*",
+                expanded=False,
+            ):
+                # ── Baris kontrol atas ───────────────────────────────────────
+                row_ctrl = st.columns([1, 1, 1, 1, 1])
+                with row_ctrl[0]:
+                    if st.button("⬆️", key=f"fb_up_{qid}", help="Naikan urutan", disabled=idx == 0):
+                        questions[idx], questions[idx-1] = questions[idx-1], questions[idx]
+                        st.session_state.fb_dirty = True
+                        st.rerun()
+                with row_ctrl[1]:
+                    if st.button("⬇️", key=f"fb_dn_{qid}", help="Turunkan urutan", disabled=idx == len(questions)-1):
+                        questions[idx], questions[idx+1] = questions[idx+1], questions[idx]
+                        st.session_state.fb_dirty = True
+                        st.rerun()
+                with row_ctrl[2]:
+                    vis_label = "👁️ Tampil" if q.get("visible", True) else "🙈 Disembunyikan"
+                    if st.button(vis_label, key=f"fb_vis_{qid}"):
+                        q["visible"] = not q.get("visible", True)
+                        st.session_state.fb_dirty = True
+                        st.rerun()
+                with row_ctrl[3]:
+                    req_label = "✅ Wajib" if q.get("required") else "❌ Tidak Wajib"
+                    if st.button(req_label, key=f"fb_req_{qid}"):
+                        q["required"] = not q.get("required", False)
+                        st.session_state.fb_dirty = True
+                        st.rerun()
+                with row_ctrl[4]:
+                    if st.button("🗑️ Hapus", key=f"fb_del_{qid}", type="secondary"):
+                        to_delete = idx
+
+                st.divider()
+
+                # ── Field konfigurasi ────────────────────────────────────────
+                c1, c2 = st.columns(2)
+                with c1:
+                    new_label = st.text_input("Label Pertanyaan", value=q["label"], key=f"fb_label_{qid}")
+                    if new_label != q["label"]:
+                        q["label"] = new_label
+                        st.session_state.fb_dirty = True
+
+                with c2:
+                    new_section = st.text_input("Nama Seksi (grup)", value=q.get("section", ""), key=f"fb_sec_{qid}",
+                                                 placeholder="cth: Data Tambahan")
+                    if new_section != q.get("section", ""):
+                        q["section"] = new_section
+                        st.session_state.fb_dirty = True
+
+                new_type_sel = st.selectbox(
+                    "Tipe Jawaban",
+                    options=list(TYPE_LABELS.keys()),
+                    index=list(TYPE_LABELS.keys()).index(qtype) if qtype in TYPE_LABELS else 0,
+                    format_func=lambda x: f"{TYPE_ICONS.get(x,'')} {TYPE_LABELS.get(x,x)}",
+                    key=f"fb_type_{qid}",
+                )
+                if new_type_sel != qtype:
+                    q["type"] = new_type_sel
+                    st.session_state.fb_dirty = True
+                    st.rerun()
+
+                new_desc = st.text_input(
+                    "Deskripsi / Instruksi (opsional)",
+                    value=q.get("description", ""),
+                    key=f"fb_desc_{qid}",
+                    placeholder="Teks kecil di bawah label pertanyaan",
+                )
+                if new_desc != q.get("description", ""):
+                    q["description"] = new_desc
+                    st.session_state.fb_dirty = True
+
+                # Placeholder (untuk text / textarea / number)
+                if qtype in ("text", "textarea", "number"):
+                    new_ph = st.text_input(
+                        "Placeholder",
+                        value=q.get("placeholder", ""),
+                        key=f"fb_ph_{qid}",
+                    )
+                    if new_ph != q.get("placeholder", ""):
+                        q["placeholder"] = new_ph
+                        st.session_state.fb_dirty = True
+
+                # Min/Max (number, scale)
+                if qtype in ("number", "scale"):
+                    mc1, mc2 = st.columns(2)
+                    with mc1:
+                        new_min = st.text_input("Nilai Minimum", value=str(q.get("min_value", "")), key=f"fb_min_{qid}")
+                        if new_min != str(q.get("min_value", "")):
+                            q["min_value"] = new_min
+                            st.session_state.fb_dirty = True
+                    with mc2:
+                        new_max = st.text_input("Nilai Maksimum", value=str(q.get("max_value", "")), key=f"fb_max_{qid}")
+                        if new_max != str(q.get("max_value", "")):
+                            q["max_value"] = new_max
+                            st.session_state.fb_dirty = True
+
+                # Options (dropdown, radio, checkbox)
+                if qtype in ("dropdown", "radio", "checkbox"):
+                    st.markdown("**Pilihan Jawaban** (satu per baris)")
+                    current_opts = "\n".join(q.get("options", []))
+                    new_opts_raw = st.text_area(
+                        "Pilihan (satu per baris)",
+                        value=current_opts,
+                        key=f"fb_opts_{qid}",
+                        height=120,
+                        label_visibility="collapsed",
+                    )
+                    new_opts = [o.strip() for o in new_opts_raw.splitlines() if o.strip()]
+                    if new_opts != q.get("options", []):
+                        q["options"] = new_opts
+                        st.session_state.fb_dirty = True
+
+                    allow_other = st.checkbox(
+                        "Izinkan jawaban 'Lainnya...' (input bebas)",
+                        value=q.get("allow_other", False),
+                        key=f"fb_other_{qid}",
+                    )
+                    if allow_other != q.get("allow_other", False):
+                        q["allow_other"] = allow_other
+                        st.session_state.fb_dirty = True
+
+                # Preview
+                st.markdown("---")
+                st.caption("👀 **Preview pertanyaan:**")
+                preview_label = q["label"] + (" **(wajib)**" if q.get("required") else " *(opsional)*")
+                if q.get("description"):
+                    st.caption(q["description"])
+
+                with st.container():
+                    if qtype == "text":
+                        st.text_input(preview_label, disabled=True, placeholder=q.get("placeholder", ""), key=f"prev_{qid}")
+                    elif qtype == "textarea":
+                        st.text_area(preview_label, disabled=True, placeholder=q.get("placeholder", ""), key=f"prev_{qid}")
+                    elif qtype == "number":
+                        st.number_input(preview_label, disabled=True, key=f"prev_{qid}")
+                    elif qtype == "date":
+                        st.date_input(preview_label, disabled=True, key=f"prev_{qid}")
+                    elif qtype == "time":
+                        st.time_input(preview_label, disabled=True, key=f"prev_{qid}")
+                    elif qtype == "dropdown":
+                        opts_prev = ["— Pilih —"] + q.get("options", [])
+                        if q.get("allow_other"):
+                            opts_prev.append("Lainnya...")
+                        st.selectbox(preview_label, opts_prev, disabled=True, key=f"prev_{qid}")
+                    elif qtype == "radio":
+                        opts_prev = q.get("options", [])
+                        if q.get("allow_other"):
+                            opts_prev = opts_prev + ["Lainnya..."]
+                        st.radio(preview_label, opts_prev or ["(belum ada pilihan)"], disabled=True, key=f"prev_{qid}", horizontal=True)
+                    elif qtype == "checkbox":
+                        st.markdown(f"**{preview_label}**")
+                        for opt in (q.get("options", []) or ["(belum ada pilihan)"]):
+                            st.checkbox(opt, disabled=True, key=f"prev_{qid}_{opt}")
+                    elif qtype == "scale":
+                        min_v = int(q.get("min_value") or 1)
+                        max_v = int(q.get("max_value") or 5)
+                        st.slider(preview_label, min_value=min_v, max_value=max_v, disabled=True, key=f"prev_{qid}")
+                    elif qtype == "yes_no":
+                        st.toggle(preview_label, disabled=True, key=f"prev_{qid}")
+                    elif qtype == "photo":
+                        st.file_uploader(preview_label, type=["jpg","jpeg","png"], disabled=True, key=f"prev_{qid}")
+
+        # Hapus setelah iterasi
+        if to_delete is not None:
+            st.session_state.fb_questions.pop(to_delete)
+            st.session_state.fb_dirty = True
+            st.rerun()
+
+        # Simpan
+        if save_btn:
+            with st.spinner("Menyimpan konfigurasi form ke Google Sheets..."):
+                save_form_config(st.session_state.fb_questions)
+                st.session_state.fb_dirty = False
+            st.success("✅ Konfigurasi form berhasil disimpan!")
+            time.sleep(1)
+            st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3: PENGATURAN
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_settings:
+        st.subheader("Pengaturan Sistem")
+
+        st.markdown("### 📋 Kelola Daftar Config")
+        st.caption("Tambah atau hapus data di tab Config Google Sheets.")
+
+        setting_tab = st.selectbox(
+            "Pilih konfigurasi yang ingin dikelola:",
+            options=[
+                ("Config_NamaPromotor", "Daftar Nama Promotor / Eksekutor"),
+                ("Config_Rayon", "Daftar Rayon"),
+                ("Config_Zona", "Daftar Zona"),
+            ],
+            format_func=lambda x: x[1],
+            key="setting_tab_sel",
+        )
+
+        tab_key  = setting_tab[0]
+        tab_name = setting_tab[1]
+
+        st.markdown(f"#### {tab_name}")
+
+        current_items = load_config_list(tab_key)
+
+        col_list, col_edit = st.columns([1, 1])
+
+        with col_list:
+            st.markdown("**Data saat ini:**")
+            if current_items:
+                for item in current_items:
+                    st.markdown(f"- {item}")
+            else:
+                st.caption("Belum ada data.")
+
+        with col_edit:
+            st.markdown("**Edit daftar** (satu per baris):")
+            current_text = "\n".join(current_items)
+            new_text = st.text_area(
+                "Edit",
+                value=current_text,
+                key=f"setting_edit_{tab_key}",
+                height=200,
+                label_visibility="collapsed",
+            )
+            if st.button("💾 Simpan Perubahan", key=f"setting_save_{tab_key}", type="primary"):
+                new_items = [i.strip() for i in new_text.splitlines() if i.strip()]
+                try:
+                    with st.spinner("Menyimpan..."):
+                        gc = get_gspread()
+                        wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+                        try:
+                            ws = wb.worksheet(tab_key)
+                        except Exception:
+                            ws = wb.add_worksheet(title=tab_key, rows=300, cols=5)
+                        ws.clear()
+                        header = tab_key.replace("Config_", "")
+                        rows_to_write = [[header]] + [[item] for item in new_items]
+                        ws.update(rows_to_write, "A1")
+                        load_config_list.clear()
+                        load_all_config.clear()
+                    st.success(f"✅ {tab_name} berhasil disimpan ({len(new_items)} item)")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal menyimpan: {e}")
+
+        st.divider()
+
+        st.markdown("### 🔧 Pengaturan Umum")
+
+        with st.expander("🗓️ Pengaturan Deadline Termin"):
+            st.info(
+                f"Saat ini: Jarak antar termin = **{TERMIN_MONTHS} bulan**, "
+                f"Peringatan kuning = **≤ {REMINDER_DAYS} hari**."
+            )
+            st.caption(
+                "Untuk mengubah nilai ini, edit konstanta `TERMIN_MONTHS` dan `REMINDER_DAYS` "
+                "di bagian atas file App.py, lalu restart aplikasi."
+            )
+
+        with st.expander("🗑️ Clear Cache"):
+            st.caption("Paksa reload semua data dari Google Sheets.")
+            if st.button("Clear semua cache", key="btn_clear_cache"):
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.success("Cache dibersihkan. Data akan di-reload saat halaman berikutnya dimuat.")
+
+        with st.expander("📊 Info Spreadsheet"):
+            st.markdown(f"- **Customer Sheet ID:** `{CUSTOMER_SHEET_ID}`")
+            st.markdown(f"- **Submission Sheet ID:** `{SUBMISSION_SHEET_ID}`")
+            st.markdown(f"- **Form Builder Tab:** `{FORM_CONFIG_TAB}`")
