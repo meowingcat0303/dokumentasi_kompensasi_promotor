@@ -581,7 +581,7 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
         "catatan": "",
     }
     extra_answers = {}
-    _customer_rendered = False  # pastikan rayon/zona mode hanya render sekali
+    _vals["_customer_rendered"] = False  # pastikan rayon/zona mode hanya render sekali
 
     visible_questions = [q for q in all_questions if q.get("visible", True)]
 
@@ -610,9 +610,8 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
             _vals["activity"] = st.selectbox(label, ["— Pilih —"] + (opts or ACTIVITY_OPTIONS), key="activity_sel")
 
         elif fid == "customer":
-            nonlocal _customer_rendered
-            if not _customer_rendered:
-                _customer_rendered = True
+            if not _vals["_customer_rendered"]:
+                _vals["_customer_rendered"] = True
                 st.radio(
                     "Mode Rayon & Zona:",
                     ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
