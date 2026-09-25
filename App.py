@@ -1210,6 +1210,12 @@ elif _PAGE == "public_form":
         st.warning("Form ini belum memiliki pertanyaan.")
         st.stop()
 
+    # Counter untuk reset semua widget key setelah submit
+    _run_key = f"pf_run_{_form_id}"
+    if _run_key not in st.session_state:
+        st.session_state[_run_key] = 0
+    _r = st.session_state[_run_key]
+
     pf_answers = {}
 
     def _render_pf_field(q):
@@ -1220,52 +1226,52 @@ elif _PAGE == "public_form":
             st.caption(q["description"])
 
         if qtype == "text":
-            pf_answers[qid] = st.text_input(label, placeholder=q.get("placeholder",""), key=f"pf_{qid}")
+            pf_answers[qid] = st.text_input(label, placeholder=q.get("placeholder",""), key=f"pf_{_r}_{qid}")
         elif qtype == "textarea":
-            pf_answers[qid] = st.text_area(label, placeholder=q.get("placeholder",""), key=f"pf_{qid}")
+            pf_answers[qid] = st.text_area(label, placeholder=q.get("placeholder",""), key=f"pf_{_r}_{qid}")
         elif qtype == "number":
             min_v = float(q["min_value"]) if q.get("min_value") else None
             max_v = float(q["max_value"]) if q.get("max_value") else None
-            pf_answers[qid] = st.number_input(label, min_value=min_v, max_value=max_v, key=f"pf_{qid}")
+            pf_answers[qid] = st.number_input(label, min_value=min_v, max_value=max_v, key=f"pf_{_r}_{qid}")
         elif qtype == "date":
-            pf_answers[qid] = str(st.date_input(label, key=f"pf_{qid}"))
+            pf_answers[qid] = str(st.date_input(label, key=f"pf_{_r}_{qid}"))
         elif qtype == "time":
-            pf_answers[qid] = str(st.time_input(label, key=f"pf_{qid}"))
+            pf_answers[qid] = str(st.time_input(label, key=f"pf_{_r}_{qid}"))
         elif qtype == "dropdown":
             opts = ["— Pilih —"] + q.get("options", [])
             if q.get("allow_other"):
                 opts.append("Lainnya...")
-            sel = st.selectbox(label, opts, key=f"pf_{qid}")
+            sel = st.selectbox(label, opts, key=f"pf_{_r}_{qid}")
             if sel == "Lainnya...":
-                sel = st.text_input("Sebutkan:", key=f"pf_{qid}_other")
+                sel = st.text_input("Sebutkan:", key=f"pf_{_r}_{qid}_other")
             pf_answers[qid] = sel if sel != "— Pilih —" else ""
         elif qtype == "radio":
             opts = q.get("options", [])
             if q.get("allow_other"):
                 opts = opts + ["Lainnya..."]
-            sel = st.radio(label, opts, key=f"pf_{qid}", horizontal=True)
+            sel = st.radio(label, opts, key=f"pf_{_r}_{qid}", horizontal=True)
             if sel == "Lainnya...":
-                sel = st.text_input("Sebutkan:", key=f"pf_{qid}_other")
+                sel = st.text_input("Sebutkan:", key=f"pf_{_r}_{qid}_other")
             pf_answers[qid] = sel or ""
         elif qtype == "checkbox":
             selected_opts = []
             st.markdown(f"**{label}**")
             for opt in q.get("options", []):
-                if st.checkbox(opt, key=f"pf_{qid}_{opt}"):
+                if st.checkbox(opt, key=f"pf_{_r}_{qid}_{opt}"):
                     selected_opts.append(opt)
             if q.get("allow_other"):
-                other_val = st.text_input("Lainnya:", key=f"pf_{qid}_other")
+                other_val = st.text_input("Lainnya:", key=f"pf_{_r}_{qid}_other")
                 if other_val:
                     selected_opts.append(other_val)
             pf_answers[qid] = ", ".join(selected_opts)
         elif qtype == "scale":
             min_v = int(q["min_value"]) if q.get("min_value") else 1
             max_v = int(q["max_value"]) if q.get("max_value") else 5
-            pf_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"pf_{qid}"))
+            pf_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"pf_{_r}_{qid}"))
         elif qtype == "yes_no":
-            pf_answers[qid] = "Ya" if st.toggle(label, key=f"pf_{qid}") else "Tidak"
+            pf_answers[qid] = "Ya" if st.toggle(label, key=f"pf_{_r}_{qid}") else "Tidak"
         elif qtype == "photo":
-            up = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"pf_{qid}")
+            up = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"pf_{_r}_{qid}")
             pf_answers[qid] = up  # simpan file object, bukan string
         elif qtype == "paragraph":
             st.markdown(q.get("description", q["label"]))
@@ -1307,7 +1313,7 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau mengisi ulang fo
             del st.session_state["pf_form_id"]
             st.rerun()
     else:
-        if st.button("Kirim Jawaban", type="primary", key="pf_submit"):
+        if st.button("Kirim Jawaban", type="primary", key=f"pf_submit_{_r}"):
             errors = []
             for q in visible_qs:
                 if q["required"]:
@@ -1376,6 +1382,7 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau mengisi ulang fo
                             "foto_errors": upload_errors,
                         }
                         st.session_state["pf_form_id"] = _form_id
+                        st.session_state[_run_key] += 1  # reset semua widget
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Gagal mengirim: {e}")
