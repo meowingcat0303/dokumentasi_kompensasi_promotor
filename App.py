@@ -10,6 +10,12 @@ import datetime
 import uuid
 import time
 import concurrent.futures
+import re
+try:
+    from streamlit_sortables import sort_items as _sort_items
+    HAS_SORTABLES = True
+except ImportError:
+    HAS_SORTABLES = False
 
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 
@@ -35,6 +41,7 @@ REMINDER_DAYS = 21
 FORM_CONFIG_TAB        = "Config_FormBuilder"
 FIXED_FIELDS_TAB       = "Config_FixedFields"
 SPREADSHEET_CONFIG_TAB = "Config_Spreadsheets"
+FORMS_LIST_TAB         = "Config_FormsV2"      # Daftar form baru (multi-form)
 
 # ── Definisi field tetap (urutan & metadata default) ──────────────────────────
 DEFAULT_FIXED_FIELDS = [
@@ -389,6 +396,191 @@ def get_active_sheet_ids() -> tuple[str, str]:
             return sub, cus
     return SUBMISSION_SHEET_ID, CUSTOMER_SHEET_ID
 
+# ── Multi-Form: Parse & Storage ───────────────────────────────────────────────
+def parse_spreadsheet_id(url_or_id: str) -> str:
+    """Ekstrak Spreadsheet ID dari URL Google Sheets atau kembalikan ID langsung."""
+    url_or_id = url_or_id.strip()
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id)
+    if m:
+        return m.group(1)
+    return url_or_id  # asumsi sudah berupa ID
+
+@st.cache_data(ttl=60)
+def load_forms_list() -> list:
+    """Load daftar form dari tab Config_FormsV2."""
+    try:
+        gc = get_gspread()
+        wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+        try:
+            ws = wb.worksheet(FORMS_LIST_TAB)
+        except Exception:
+            return []
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        headers = rows[0]
+        result = []
+        for r in rows[1:]:
+            if not any(r):
+                continue
+            d = dict(zip(headers, r + [""] * max(0, len(headers) - len(r))))
+            result.append({
+                "form_id":        d.get("form_id", ""),
+                "form_name":      d.get("form_name", ""),
+                "description":    d.get("description", ""),
+                "spreadsheet_url": d.get("spreadsheet_url", ""),
+                "created_at":     d.get("created_at", ""),
+                "active":         d.get("active", "true").lower() != "false",
+            })
+        return result
+    except Exception:
+        return []
+
+def save_forms_list(forms: list):
+    gc = get_gspread()
+    wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+    try:
+        ws = wb.worksheet(FORMS_LIST_TAB)
+    except Exception:
+        ws = wb.add_worksheet(title=FORMS_LIST_TAB, rows=200, cols=10)
+    headers = ["form_id", "form_name", "description", "spreadsheet_url", "created_at", "active"]
+    rows = [headers]
+    for f in forms:
+        rows.append([
+            f.get("form_id", ""),
+            f.get("form_name", ""),
+            f.get("description", ""),
+            f.get("spreadsheet_url", ""),
+            f.get("created_at", ""),
+            str(f.get("active", True)).lower(),
+        ])
+    ws.clear()
+    ws.update(rows, "A1")
+    load_forms_list.clear()
+
+@st.cache_data(ttl=30)
+def load_form_questions(form_id: str) -> list:
+    """Load pertanyaan untuk form tertentu dari tab FormQ_<form_id>."""
+    tab_name = f"FormQ_{form_id}"
+    try:
+        gc = get_gspread()
+        wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+        try:
+            ws = wb.worksheet(tab_name)
+        except Exception:
+            return []
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        headers = rows[0]
+        questions = []
+        for r in rows[1:]:
+            if not any(r):
+                continue
+            d = dict(zip(headers, r + [""] * max(0, len(headers) - len(r))))
+            questions.append({
+                "question_id": d.get("question_id", str(uuid.uuid4())[:8]),
+                "order":       int(d.get("order", 0) or 0),
+                "label":       d.get("label", ""),
+                "type":        d.get("type", "text"),
+                "required":    d.get("required", "false").lower() == "true",
+                "options":     [o.strip() for o in d.get("options", "").split("|") if o.strip()],
+                "placeholder": d.get("placeholder", ""),
+                "description": d.get("description", ""),
+                "min_value":   d.get("min_value", ""),
+                "max_value":   d.get("max_value", ""),
+                "allow_other": d.get("allow_other", "false").lower() == "true",
+                "visible":     d.get("visible", "true").lower() != "false",
+                "col_locked":  d.get("col_locked", "false").lower() == "true",
+                "col_index":   int(d.get("col_index", 0) or 0),
+                "section":     d.get("section", ""),
+            })
+        questions.sort(key=lambda x: x["order"])
+        return questions
+    except Exception as e:
+        st.warning(f"Gagal load pertanyaan form {form_id}: {e}")
+        return []
+
+def save_form_questions(form_id: str, questions: list):
+    """Simpan pertanyaan ke tab FormQ_<form_id>."""
+    tab_name = f"FormQ_{form_id}"
+    gc = get_gspread()
+    wb = gc.open_by_key(SUBMISSION_SHEET_ID)
+    try:
+        ws = wb.worksheet(tab_name)
+    except Exception:
+        ws = wb.add_worksheet(title=tab_name, rows=300, cols=20)
+    headers = [
+        "question_id", "order", "label", "type", "required", "options",
+        "placeholder", "description", "min_value", "max_value",
+        "allow_other", "visible", "col_locked", "col_index", "section",
+    ]
+    rows = [headers]
+    for i, q in enumerate(questions):
+        col_index = q.get("col_index", 0)
+        if not col_index:
+            col_index = i + 1
+        rows.append([
+            q.get("question_id", str(uuid.uuid4())[:8]),
+            str(i + 1),
+            q.get("label", ""),
+            q.get("type", "text"),
+            str(q.get("required", False)).lower(),
+            "|".join(q.get("options", [])),
+            q.get("placeholder", ""),
+            q.get("description", ""),
+            str(q.get("min_value", "")),
+            str(q.get("max_value", "")),
+            str(q.get("allow_other", False)).lower(),
+            str(q.get("visible", True)).lower(),
+            str(q.get("col_locked", False)).lower(),
+            str(col_index),
+            q.get("section", ""),
+        ])
+    ws.clear()
+    ws.update(rows, "A1")
+    load_form_questions.clear()
+
+def submit_to_public_spreadsheet(spreadsheet_url: str, questions: list, answers: dict):
+    """
+    Tulis jawaban ke spreadsheet yang dikonfigurasi admin.
+    Urutan kolom: sorted by col_index (jika locked) atau by order.
+    Baris pertama = header (label pertanyaan), baris berikutnya = data.
+    """
+    sheet_id = parse_spreadsheet_id(spreadsheet_url)
+    gc = get_gspread()
+    wb = gc.open_by_key(sheet_id)
+
+    # Ambil atau buat sheet pertama
+    try:
+        ws = wb.sheet1
+    except Exception:
+        ws = wb.add_worksheet(title="Responses", rows=5000, cols=50)
+
+    # Bangun urutan kolom: locked pakai col_index, unlocked pakai order
+    def _col_key(q):
+        if q.get("col_locked") and q.get("col_index", 0) > 0:
+            return (0, q["col_index"])    # locked: prioritas absolut
+        return (1, q["order"])            # unlocked: ikut urutan
+
+    sorted_qs = sorted([q for q in questions if q.get("visible", True)], key=_col_key)
+
+    # Cek apakah header sudah ada
+    existing = ws.get_all_values()
+    headers_needed = [q["label"] for q in sorted_qs] + ["Waktu Submit"]
+
+    if not existing or existing[0] != headers_needed:
+        # Tulis / update header row
+        ws.update([headers_needed], "A1")
+
+    # Bangun data row
+    row_data = []
+    for q in sorted_qs:
+        row_data.append(str(answers.get(q["question_id"], "") or ""))
+    row_data.append(datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S"))
+
+    ws.append_row(row_data, value_input_option="USER_ENTERED")
+
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
     """Kompres gambar. Kalau hasil masih >1.5MB, turunkan quality otomatis."""
@@ -547,16 +739,30 @@ function getLocation() {
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Dokumentasi Investment Lapangan", layout="centered")
 
-page = st.sidebar.radio(
-    "Menu",
-    ["Input Dokumentasi", "Monitoring (Admin)"],
-    key="nav_page",
-)
+# ── Routing berbasis query params ─────────────────────────────────────────────
+_qp        = st.query_params
+_mode      = _qp.get("mode", "")        # "admin"
+_form_id   = _qp.get("form", "")        # form ID publik
+
+if _form_id:
+    _PAGE = "public_form"
+elif _mode == "admin":
+    _PAGE = "admin"
+else:
+    _PAGE = "input"
+    # Sidebar hanya untuk mode default
+    page = st.sidebar.radio(
+        "Menu",
+        ["Input Dokumentasi", "Monitoring (Admin)"],
+        key="nav_page",
+    )
+    if page == "Monitoring (Admin)":
+        _PAGE = "admin_sidebar"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — INPUT DOKUMENTASI
 # ══════════════════════════════════════════════════════════════════════════════
-if page == "Input Dokumentasi":
+if _PAGE == "input":
 
     st.title("Dokumentasi Investment Lapangan")
 
@@ -974,9 +1180,138 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — MONITORING & ADMIN PANEL
+# PAGE: PUBLIC FORM  (?form=<form_id>)
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "Monitoring (Admin)":
+elif _PAGE == "public_form":
+    @st.cache_data(ttl=30)
+    def _get_form_meta(fid):
+        forms = load_forms_list()
+        for f in forms:
+            if f["form_id"] == fid:
+                return f
+        return None
+
+    form_meta = _get_form_meta(_form_id)
+    if not form_meta or not form_meta.get("active"):
+        st.error("❌ Form tidak ditemukan atau sudah tidak aktif.")
+        st.stop()
+
+    st.title(form_meta["form_name"])
+    if form_meta.get("description"):
+        st.caption(form_meta["description"])
+
+    form_questions = load_form_questions(_form_id)
+    visible_qs = [q for q in form_questions if q.get("visible", True)]
+
+    if not visible_qs:
+        st.warning("Form ini belum memiliki pertanyaan.")
+        st.stop()
+
+    pf_answers = {}
+
+    def _render_pf_field(q):
+        qid   = q["question_id"]
+        qtype = q["type"]
+        label = q["label"] + (" *" if q["required"] else " (opsional)")
+        if q.get("description"):
+            st.caption(q["description"])
+
+        if qtype == "text":
+            pf_answers[qid] = st.text_input(label, placeholder=q.get("placeholder",""), key=f"pf_{qid}")
+        elif qtype == "textarea":
+            pf_answers[qid] = st.text_area(label, placeholder=q.get("placeholder",""), key=f"pf_{qid}")
+        elif qtype == "number":
+            min_v = float(q["min_value"]) if q.get("min_value") else None
+            max_v = float(q["max_value"]) if q.get("max_value") else None
+            pf_answers[qid] = st.number_input(label, min_value=min_v, max_value=max_v, key=f"pf_{qid}")
+        elif qtype == "date":
+            pf_answers[qid] = str(st.date_input(label, key=f"pf_{qid}"))
+        elif qtype == "time":
+            pf_answers[qid] = str(st.time_input(label, key=f"pf_{qid}"))
+        elif qtype == "dropdown":
+            opts = ["— Pilih —"] + q.get("options", [])
+            if q.get("allow_other"):
+                opts.append("Lainnya...")
+            sel = st.selectbox(label, opts, key=f"pf_{qid}")
+            if sel == "Lainnya...":
+                sel = st.text_input("Sebutkan:", key=f"pf_{qid}_other")
+            pf_answers[qid] = sel if sel != "— Pilih —" else ""
+        elif qtype == "radio":
+            opts = q.get("options", [])
+            if q.get("allow_other"):
+                opts = opts + ["Lainnya..."]
+            sel = st.radio(label, opts, key=f"pf_{qid}", horizontal=True)
+            if sel == "Lainnya...":
+                sel = st.text_input("Sebutkan:", key=f"pf_{qid}_other")
+            pf_answers[qid] = sel or ""
+        elif qtype == "checkbox":
+            selected_opts = []
+            st.markdown(f"**{label}**")
+            for opt in q.get("options", []):
+                if st.checkbox(opt, key=f"pf_{qid}_{opt}"):
+                    selected_opts.append(opt)
+            if q.get("allow_other"):
+                other_val = st.text_input("Lainnya:", key=f"pf_{qid}_other")
+                if other_val:
+                    selected_opts.append(other_val)
+            pf_answers[qid] = ", ".join(selected_opts)
+        elif qtype == "scale":
+            min_v = int(q["min_value"]) if q.get("min_value") else 1
+            max_v = int(q["max_value"]) if q.get("max_value") else 5
+            pf_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"pf_{qid}"))
+        elif qtype == "yes_no":
+            pf_answers[qid] = "Ya" if st.toggle(label, key=f"pf_{qid}") else "Tidak"
+        elif qtype == "photo":
+            up = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"pf_{qid}")
+            pf_answers[qid] = "[foto]" if up else ""
+        elif qtype == "paragraph":
+            st.markdown(q.get("description", q["label"]))
+
+    current_section = None
+    for q in visible_qs:
+        sec = q.get("section", "")
+        if sec and sec != current_section:
+            st.divider()
+            st.subheader(sec)
+            current_section = sec
+        _render_pf_field(q)
+
+    st.divider()
+
+    if "pf_submitted" in st.session_state and st.session_state.get("pf_form_id") == _form_id:
+        st.success("✅ Jawaban Anda berhasil dikirim! Terima kasih.")
+        if st.button("Isi ulang form"):
+            del st.session_state["pf_submitted"]
+            st.rerun()
+    else:
+        if st.button("Kirim Jawaban", type="primary", key="pf_submit"):
+            errors = []
+            for q in visible_qs:
+                if q["required"]:
+                    val = pf_answers.get(q["question_id"], "")
+                    if not val or val == "— Pilih —":
+                        errors.append(f"'{q['label']}' wajib diisi")
+            if errors:
+                for e in errors:
+                    st.error(e)
+            else:
+                with st.spinner("Mengirim jawaban..."):
+                    try:
+                        submit_to_public_spreadsheet(
+                            form_meta["spreadsheet_url"],
+                            visible_qs,
+                            pf_answers,
+                        )
+                        st.session_state["pf_submitted"] = True
+                        st.session_state["pf_form_id"] = _form_id
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Gagal mengirim: {e}")
+
+elif _PAGE in ("admin", "admin_sidebar"):
+    pass  # handled below
+
+if _PAGE in ("admin", "admin_sidebar"):
 
     st.title("Panel Admin")
 
@@ -1002,12 +1337,432 @@ elif page == "Monitoring (Admin)":
             st.session_state.admin_authenticated = False
             st.rerun()
 
+    # ── Info link admin ───────────────────────────────────────────────────────
+    if _PAGE == "admin":
+        _base = st.query_params.get("_base_url", "")
+        st.caption(f"🔗 URL Admin: `?mode=admin` — bagikan hanya ke admin")
+
     # ── Tab Admin ─────────────────────────────────────────────────────────────
-    tab_monitoring, tab_formbuilder, tab_settings = st.tabs([
+    tab_formmanager, tab_monitoring, tab_formbuilder, tab_settings = st.tabs([
+        "📋 Form Manager",
         "📊 Monitoring Submission",
-        "📝 Form Builder",
+        "📝 Form Builder (Input Dokumentasi)",
         "⚙️ Pengaturan",
     ])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 0: FORM MANAGER
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_formmanager:
+        st.subheader("Form Manager")
+        st.caption("Buat dan kelola form publik seperti Google Form. Setiap form punya link unik.")
+
+        if "fm_forms" not in st.session_state:
+            st.session_state.fm_forms = load_forms_list()
+        if "fm_active_form" not in st.session_state:
+            st.session_state.fm_active_form = None  # form_id yang sedang diedit
+
+        fm_forms = st.session_state.fm_forms
+
+        # ── Tampilkan link form jika ada yang diedit ──────────────────────────
+        if st.session_state.fm_active_form:
+            fid = st.session_state.fm_active_form
+            meta = next((f for f in fm_forms if f["form_id"] == fid), None)
+            if not meta:
+                st.session_state.fm_active_form = None
+                st.rerun()
+
+            # ── Header editor ─────────────────────────────────────────────────
+            col_back, col_title = st.columns([1, 4])
+            with col_back:
+                if st.button("← Kembali", key="fm_back"):
+                    st.session_state.fm_active_form = None
+                    st.rerun()
+            with col_title:
+                st.markdown(f"### ✏️ Edit Form: **{meta['form_name']}**")
+
+            # Link form
+            try:
+                base = st.get_option("browser.serverAddress") or "localhost"
+                port = st.get_option("browser.serverPort") or 8501
+                form_link = f"http://{base}:{port}/?form={fid}"
+            except Exception:
+                form_link = f"/?form={fid}"
+
+            st.info(f"🔗 **Link Form Publik:** `?form={fid}`\n\nSalin URL browser ini dan ganti akhirannya dengan `?form={fid}`")
+
+            # Info spreadsheet
+            with st.expander("📊 Pengaturan Spreadsheet & Info Form", expanded=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    new_name = st.text_input("Nama Form", value=meta["form_name"], key="fm_edit_name")
+                    if new_name != meta["form_name"]:
+                        meta["form_name"] = new_name
+                with c2:
+                    new_desc = st.text_input("Deskripsi (opsional)", value=meta.get("description",""), key="fm_edit_desc")
+                    if new_desc != meta.get("description",""):
+                        meta["description"] = new_desc
+
+                new_url = st.text_input(
+                    "🔗 URL Spreadsheet Penerima Jawaban *",
+                    value=meta.get("spreadsheet_url",""),
+                    key="fm_edit_url",
+                    placeholder="https://docs.google.com/spreadsheets/d/xxx/edit",
+                    help="Paste URL lengkap Google Sheets. Pastikan service account sudah diberi akses editor ke spreadsheet ini.",
+                )
+                if new_url != meta.get("spreadsheet_url",""):
+                    meta["spreadsheet_url"] = new_url
+
+                if meta.get("spreadsheet_url"):
+                    sid = parse_spreadsheet_id(meta["spreadsheet_url"])
+                    st.caption(f"Sheet ID: `{sid}`")
+                else:
+                    st.warning("⚠️ Spreadsheet belum dikonfigurasi. Form tidak bisa menerima jawaban.")
+
+                col_sv, col_toggle = st.columns(2)
+                with col_sv:
+                    if st.button("💾 Simpan Info Form", key="fm_save_meta", type="primary"):
+                        save_forms_list(fm_forms)
+                        st.session_state.fm_forms = load_forms_list()
+                        st.success("✅ Info form disimpan.")
+                with col_toggle:
+                    toggle_lbl = "🟢 Aktif" if meta.get("active") else "🔴 Nonaktif"
+                    if st.button(toggle_lbl, key="fm_toggle_active"):
+                        meta["active"] = not meta.get("active", True)
+                        save_forms_list(fm_forms)
+                        st.session_state.fm_forms = load_forms_list()
+                        st.rerun()
+
+            st.divider()
+            st.markdown("### 📝 Pertanyaan")
+
+            # ── Session state pertanyaan form yang diedit ─────────────────────
+            fq_key = f"fm_questions_{fid}"
+            fq_dirty_key = f"fm_dirty_{fid}"
+            if fq_key not in st.session_state:
+                with st.spinner("Memuat pertanyaan..."):
+                    st.session_state[fq_key] = load_form_questions(fid)
+            if fq_dirty_key not in st.session_state:
+                st.session_state[fq_dirty_key] = False
+
+            fq_questions = st.session_state[fq_key]
+
+            # ── Toolbar pertanyaan ────────────────────────────────────────────
+            tcol1, tcol2, tcol3 = st.columns([3, 1, 1])
+            with tcol1:
+                fq_new_type = st.selectbox(
+                    "Tipe pertanyaan baru:",
+                    options=[
+                        ("text",      "📝 Jawaban Singkat"),
+                        ("textarea",  "📄 Paragraf"),
+                        ("number",    "🔢 Angka"),
+                        ("date",      "📅 Tanggal"),
+                        ("time",      "🕐 Waktu"),
+                        ("dropdown",  "▼ Dropdown"),
+                        ("radio",     "⭕ Pilihan Ganda"),
+                        ("checkbox",  "☑️ Kotak Centang"),
+                        ("scale",     "⭐ Skala / Rating"),
+                        ("yes_no",    "✅ Ya / Tidak"),
+                        ("photo",     "📷 Upload Foto"),
+                        ("paragraph", "📌 Teks Judul/Instruksi"),
+                    ],
+                    format_func=lambda x: x[1],
+                    key="fq_new_type",
+                )
+            with tcol2:
+                st.write("")
+                if st.button("➕ Tambah", key="fq_add", use_container_width=True):
+                    new_q = {
+                        "question_id": str(uuid.uuid4())[:8],
+                        "order": len(fq_questions) + 1,
+                        "label": "Pertanyaan Baru",
+                        "type": fq_new_type[0],
+                        "required": False,
+                        "options": [],
+                        "placeholder": "",
+                        "description": "",
+                        "min_value": "",
+                        "max_value": "",
+                        "allow_other": False,
+                        "visible": True,
+                        "col_locked": False,
+                        "col_index": len(fq_questions) + 1,
+                        "section": "",
+                    }
+                    fq_questions.append(new_q)
+                    st.session_state[fq_dirty_key] = True
+                    st.rerun()
+            with tcol3:
+                st.write("")
+                fq_save_btn = st.button(
+                    "💾 Simpan",
+                    key="fq_save",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not st.session_state[fq_dirty_key],
+                )
+
+            if st.session_state[fq_dirty_key]:
+                st.info("⚠️ Ada perubahan belum disimpan.")
+
+            # ── Drag & Drop urutan ────────────────────────────────────────────
+            st.markdown("**🔀 Atur Urutan Pertanyaan (Drag & Drop)**")
+
+            if HAS_SORTABLES and fq_questions:
+                sort_items_list = [f"{q['question_id']}::{q['label']}" for q in fq_questions]
+                sorted_result = _sort_items(sort_items_list, direction="vertical", key=f"sort_{fid}")
+                if sorted_result != sort_items_list:
+                    id_to_q = {q["question_id"]: q for q in fq_questions}
+                    new_order = []
+                    for item in sorted_result:
+                        qid_part = item.split("::")[0]
+                        if qid_part in id_to_q:
+                            new_order.append(id_to_q[qid_part])
+                    if new_order:
+                        # Update col_index untuk yang tidak di-lock
+                        for i, q in enumerate(new_order):
+                            q["order"] = i + 1
+                            if not q.get("col_locked"):
+                                q["col_index"] = i + 1
+                        st.session_state[fq_key] = new_order
+                        st.session_state[fq_dirty_key] = True
+                        st.rerun()
+            elif not HAS_SORTABLES:
+                st.caption("ℹ️ Install `streamlit-sortables` untuk drag & drop. Gunakan tombol ⬆️⬇️ di bawah.")
+
+            st.divider()
+
+            # ── Daftar pertanyaan (editable) ──────────────────────────────────
+            FQ_TYPE_LABELS = {
+                "text": "Jawaban Singkat", "textarea": "Paragraf", "number": "Angka",
+                "date": "Tanggal", "time": "Waktu", "dropdown": "Dropdown",
+                "radio": "Pilihan Ganda", "checkbox": "Kotak Centang", "scale": "Skala",
+                "yes_no": "Ya / Tidak", "photo": "Upload Foto", "paragraph": "Judul/Instruksi",
+            }
+            FQ_TYPE_ICONS = {
+                "text": "📝", "textarea": "📄", "number": "🔢", "date": "📅", "time": "🕐",
+                "dropdown": "▼", "radio": "⭕", "checkbox": "☑️", "scale": "⭐",
+                "yes_no": "✅", "photo": "📷", "paragraph": "📌",
+            }
+
+            fq_to_delete = None
+
+            for fq_idx, fq in enumerate(fq_questions):
+                qid    = fq["question_id"]
+                qtype  = fq["type"]
+                icon   = FQ_TYPE_ICONS.get(qtype, "📝")
+                tlabel = FQ_TYPE_LABELS.get(qtype, qtype)
+                req_m  = " *" if fq.get("required") else ""
+                vis_m  = "" if fq.get("visible", True) else " 🚫"
+                lock_m = " 🔒" if fq.get("col_locked") else ""
+
+                col_letter = chr(64 + fq.get("col_index", fq_idx + 1)) if fq.get("col_index", fq_idx+1) <= 26 else f"col{fq.get('col_index','?')}"
+
+                with st.expander(
+                    f"{icon} {fq_idx+1}. {fq['label']}{req_m}{vis_m}{lock_m}   —   *{tlabel}*   `→ Kol. {col_letter}`",
+                    expanded=False,
+                ):
+                    # Kontrol urutan
+                    rctrl = st.columns([1, 1, 1, 1, 1, 1])
+                    with rctrl[0]:
+                        if st.button("⬆️", key=f"fq_up_{qid}", disabled=fq_idx==0):
+                            fq_questions[fq_idx], fq_questions[fq_idx-1] = fq_questions[fq_idx-1], fq_questions[fq_idx]
+                            # Update order & col_index untuk non-locked
+                            for ii, q in enumerate(fq_questions):
+                                q["order"] = ii + 1
+                                if not q.get("col_locked"):
+                                    q["col_index"] = ii + 1
+                            st.session_state[fq_dirty_key] = True
+                            st.rerun()
+                    with rctrl[1]:
+                        if st.button("⬇️", key=f"fq_dn_{qid}", disabled=fq_idx==len(fq_questions)-1):
+                            fq_questions[fq_idx], fq_questions[fq_idx+1] = fq_questions[fq_idx+1], fq_questions[fq_idx]
+                            for ii, q in enumerate(fq_questions):
+                                q["order"] = ii + 1
+                                if not q.get("col_locked"):
+                                    q["col_index"] = ii + 1
+                            st.session_state[fq_dirty_key] = True
+                            st.rerun()
+                    with rctrl[2]:
+                        vis_lbl = "👁️ Tampil" if fq.get("visible", True) else "🙈 Sembunyikan"
+                        if st.button(vis_lbl, key=f"fq_vis_{qid}"):
+                            fq["visible"] = not fq.get("visible", True)
+                            st.session_state[fq_dirty_key] = True
+                            st.rerun()
+                    with rctrl[3]:
+                        req_lbl = "✅ Wajib" if fq.get("required") else "❌ Tidak Wajib"
+                        if st.button(req_lbl, key=f"fq_req_{qid}"):
+                            fq["required"] = not fq.get("required", False)
+                            st.session_state[fq_dirty_key] = True
+                            st.rerun()
+                    with rctrl[4]:
+                        lock_lbl = "🔒 Kunci Kolom" if fq.get("col_locked") else "🔓 Bebas"
+                        if st.button(lock_lbl, key=f"fq_lock_{qid}"):
+                            fq["col_locked"] = not fq.get("col_locked", False)
+                            if fq["col_locked"] and not fq.get("col_index"):
+                                fq["col_index"] = fq_idx + 1
+                            st.session_state[fq_dirty_key] = True
+                            st.rerun()
+                    with rctrl[5]:
+                        if st.button("🗑️ Hapus", key=f"fq_del_{qid}"):
+                            fq_to_delete = fq_idx
+
+                    # Kunci kolom — edit manual
+                    if fq.get("col_locked"):
+                        ci_val = fq.get("col_index", fq_idx+1)
+                        new_ci = st.number_input(
+                            f"📌 Kolom spreadsheet (1=A, 2=B, ...)",
+                            min_value=1, max_value=100,
+                            value=int(ci_val),
+                            key=f"fq_ci_{qid}",
+                            help="Angka ini menentukan kolom di spreadsheet. Dikunci = tidak berubah meski urutan form diubah.",
+                        )
+                        col_letter_show = chr(64 + new_ci) if new_ci <= 26 else f"col{new_ci}"
+                        st.caption(f"→ Akan ditulis ke **Kolom {col_letter_show}** spreadsheet")
+                        if new_ci != fq.get("col_index"):
+                            fq["col_index"] = new_ci
+                            st.session_state[fq_dirty_key] = True
+
+                    st.divider()
+
+                    # Edit label, section, tipe
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        new_label = st.text_input("Label Pertanyaan", value=fq["label"], key=f"fq_label_{qid}")
+                        if new_label != fq["label"]:
+                            fq["label"] = new_label; st.session_state[fq_dirty_key] = True
+                    with ec2:
+                        new_sec = st.text_input("Nama Seksi (opsional)", value=fq.get("section",""), key=f"fq_sec_{qid}", placeholder="cth: Data Pribadi")
+                        if new_sec != fq.get("section",""):
+                            fq["section"] = new_sec; st.session_state[fq_dirty_key] = True
+
+                    new_type_sel = st.selectbox(
+                        "Tipe Jawaban",
+                        options=list(FQ_TYPE_LABELS.keys()),
+                        index=list(FQ_TYPE_LABELS.keys()).index(qtype) if qtype in FQ_TYPE_LABELS else 0,
+                        format_func=lambda x: f"{FQ_TYPE_ICONS.get(x,'')} {FQ_TYPE_LABELS.get(x,x)}",
+                        key=f"fq_type_{qid}",
+                    )
+                    if new_type_sel != qtype:
+                        fq["type"] = new_type_sel; st.session_state[fq_dirty_key] = True; st.rerun()
+
+                    new_desc = st.text_input("Deskripsi / Instruksi", value=fq.get("description",""), key=f"fq_desc_{qid}")
+                    if new_desc != fq.get("description",""):
+                        fq["description"] = new_desc; st.session_state[fq_dirty_key] = True
+
+                    if qtype in ("text","textarea","number"):
+                        new_ph = st.text_input("Placeholder", value=fq.get("placeholder",""), key=f"fq_ph_{qid}")
+                        if new_ph != fq.get("placeholder",""):
+                            fq["placeholder"] = new_ph; st.session_state[fq_dirty_key] = True
+
+                    if qtype in ("number","scale"):
+                        mc1, mc2 = st.columns(2)
+                        with mc1:
+                            new_min = st.text_input("Nilai Min", value=str(fq.get("min_value","")), key=f"fq_min_{qid}")
+                            if new_min != str(fq.get("min_value","")):
+                                fq["min_value"] = new_min; st.session_state[fq_dirty_key] = True
+                        with mc2:
+                            new_max = st.text_input("Nilai Max", value=str(fq.get("max_value","")), key=f"fq_max_{qid}")
+                            if new_max != str(fq.get("max_value","")):
+                                fq["max_value"] = new_max; st.session_state[fq_dirty_key] = True
+
+                    if qtype in ("dropdown","radio","checkbox"):
+                        st.markdown("**Pilihan Jawaban** (satu per baris)")
+                        cur_opts = "\n".join(fq.get("options",[]))
+                        new_opts_raw = st.text_area("Opsi", value=cur_opts, key=f"fq_opts_{qid}", height=120, label_visibility="collapsed")
+                        new_opts = [o.strip() for o in new_opts_raw.splitlines() if o.strip()]
+                        if new_opts != fq.get("options",[]):
+                            fq["options"] = new_opts; st.session_state[fq_dirty_key] = True
+                        allow_other = st.checkbox("Izinkan jawaban 'Lainnya...'", value=fq.get("allow_other",False), key=f"fq_other_{qid}")
+                        if allow_other != fq.get("allow_other",False):
+                            fq["allow_other"] = allow_other; st.session_state[fq_dirty_key] = True
+
+            if fq_to_delete is not None:
+                fq_questions.pop(fq_to_delete)
+                st.session_state[fq_dirty_key] = True
+                st.rerun()
+
+            if fq_save_btn:
+                with st.spinner("Menyimpan pertanyaan..."):
+                    # Assign col_index untuk yang belum locked
+                    for ii, q in enumerate(fq_questions):
+                        if not q.get("col_locked"):
+                            q["col_index"] = ii + 1
+                        q["order"] = ii + 1
+                    save_form_questions(fid, fq_questions)
+                    st.session_state[fq_dirty_key] = False
+                st.success("✅ Pertanyaan berhasil disimpan!")
+                time.sleep(1)
+                st.rerun()
+
+        else:
+            # ── List semua form ────────────────────────────────────────────────
+            col_new, col_reload_fm = st.columns([3, 1])
+            with col_new:
+                new_form_name = st.text_input("Nama form baru:", placeholder="cth: Survey Kepuasan Pelanggan", key="fm_new_name")
+            with col_reload_fm:
+                st.write("")
+                if st.button("🔄 Reload", key="fm_reload", use_container_width=True):
+                    load_forms_list.clear()
+                    st.session_state.fm_forms = load_forms_list()
+                    st.rerun()
+
+            if st.button("➕ Buat Form Baru", key="fm_create", type="primary", disabled=not new_form_name.strip()):
+                new_fid = str(uuid.uuid4())[:12].replace("-","")
+                new_form = {
+                    "form_id":        new_fid,
+                    "form_name":      new_form_name.strip(),
+                    "description":    "",
+                    "spreadsheet_url": "",
+                    "created_at":     datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S"),
+                    "active":         True,
+                }
+                fm_forms.append(new_form)
+                save_forms_list(fm_forms)
+                st.session_state.fm_forms = load_forms_list()
+                st.session_state.fm_active_form = new_fid
+                st.rerun()
+
+            st.divider()
+
+            if not fm_forms:
+                st.markdown(
+                    """<div style="text-align:center;padding:40px;color:#888;border:2px dashed #ddd;border-radius:12px">
+                    <div style="font-size:48px">📋</div>
+                    <div style="font-size:16px;margin-top:12px">Belum ada form. Buat form pertama Anda!</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            else:
+                fm_to_del = None
+                for fi, fm in enumerate(fm_forms):
+                    status = "🟢 Aktif" if fm.get("active") else "🔴 Nonaktif"
+                    url_ok = "✅" if fm.get("spreadsheet_url") else "⚠️ Belum ada spreadsheet"
+                    with st.expander(f"{'🟢' if fm.get('active') else '🔴'} **{fm['form_name']}** — {url_ok}", expanded=False):
+                        st.caption(f"ID: `{fm['form_id']}` | Dibuat: {fm.get('created_at','?')} | {status}")
+                        if fm.get("description"):
+                            st.markdown(fm["description"])
+                        st.info(f"🔗 Link form: tambahkan `?form={fm['form_id']}` ke URL aplikasi ini")
+                        fc1, fc2, fc3 = st.columns(3)
+                        with fc1:
+                            if st.button("✏️ Edit Form", key=f"fm_edit_{fi}", type="primary", use_container_width=True):
+                                st.session_state.fm_active_form = fm["form_id"]
+                                st.rerun()
+                        with fc2:
+                            tog = "Nonaktifkan" if fm.get("active") else "Aktifkan"
+                            if st.button(tog, key=f"fm_tog_{fi}", use_container_width=True):
+                                fm["active"] = not fm.get("active", True)
+                                save_forms_list(fm_forms)
+                                st.session_state.fm_forms = load_forms_list()
+                                st.rerun()
+                        with fc3:
+                            if st.button("🗑️ Hapus", key=f"fm_del_{fi}", use_container_width=True):
+                                fm_to_del = fi
+                if fm_to_del is not None:
+                    fm_forms.pop(fm_to_del)
+                    save_forms_list(fm_forms)
+                    st.session_state.fm_forms = load_forms_list()
+                    st.rerun()
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 1: MONITORING
@@ -1232,10 +1987,7 @@ elif page == "Monitoring (Admin)":
             "dropdown": "▼", "radio": "⭕", "checkbox": "☑️", "scale": "⭐",
             "yes_no": "✅", "photo": "📷", "customer": "🏪", "gps": "📍",
         }
-        # field_id sistem yang tipe-nya tidak boleh diubah
-        SYSTEM_FIELD_IDS = {"tanggal","promotor","program","jenis","brand","activity",
-                            "customer","gps","foto_ktp","foto_sunblind","foto_display","foto_kompens","catatan"}
-        # field_id yang boleh edit opsi dropdown-nya
+        # field_id sistem — kunci DIHAPUS, semua bisa diedit bebas
         EDITABLE_OPTIONS_IDS = {"program","jenis","brand","activity"}
 
         if not questions:
@@ -1256,13 +2008,12 @@ elif page == "Monitoring (Admin)":
             qtype  = q["type"]
             icon   = TYPE_ICONS.get(qtype, "📝")
             tlabel = TYPE_LABELS.get(qtype, qtype)
-            is_sys = bool(fid)
-            sys_badge = " 🔒" if is_sys else ""
             vis_m  = "" if q.get("visible", True) else " 🚫"
             req_m  = " *" if q.get("required") else ""
+            sys_hint = f" [{fid}]" if fid else ""
 
             with st.expander(
-                f"{icon} {idx+1}. {q['label']}{req_m}{vis_m}{sys_badge}   —   *{tlabel}*",
+                f"{icon} {idx+1}. {q['label']}{req_m}{vis_m}{sys_hint}   —   *{tlabel}*",
                 expanded=False,
             ):
                 # ── Kontrol urutan & aksi ─────────────────────────────────────
@@ -1290,22 +2041,11 @@ elif page == "Monitoring (Admin)":
                         st.session_state.fb_dirty = True
                         st.rerun()
                 with row_ctrl[4]:
-                    if is_sys:
-                        if st.button("↩️ Reset", key=f"fb_reset_{qid}"):
-                            default = next((d for d in DEFAULT_FIXED_FIELDS if d["field_id"] == fid), None)
-                            if default:
-                                q["label"]    = default["label"]
-                                q["required"] = default["required"]
-                                q["visible"]  = default["visible"]
-                                q["options"]  = list(default["options"])
-                                st.session_state.fb_dirty = True
-                                st.rerun()
-                    else:
-                        if st.button("🗑️ Hapus", key=f"fb_del_{qid}", type="secondary"):
-                            to_delete = idx
+                    if st.button("🗑️ Hapus", key=f"fb_del_{qid}", type="secondary"):
+                        to_delete = idx
 
-                if is_sys:
-                    st.caption(f"🔒 Field sistem (`{fid}`) — tipe tidak bisa diubah.")
+                if fid:
+                    st.caption(f"ℹ️ Field internal: `{fid}` — logika submit form utama terkait field ini.")
 
                 st.divider()
 
@@ -1322,8 +2062,8 @@ elif page == "Monitoring (Admin)":
                         q["section"] = new_section
                         st.session_state.fb_dirty = True
 
-                # Tipe jawaban — hanya untuk non-sistem
-                if not is_sys:
+                # Tipe jawaban — semua bisa diubah
+                if not fid:
                     new_type_sel = st.selectbox(
                         "Tipe Jawaban",
                         options=list(TYPE_LABELS.keys()),
@@ -1342,14 +2082,14 @@ elif page == "Monitoring (Admin)":
                     st.session_state.fb_dirty = True
 
                 # Placeholder
-                if qtype in ("text","textarea","number") and not is_sys:
+                if qtype in ("text","textarea","number"):
                     new_ph = st.text_input("Placeholder", value=q.get("placeholder",""), key=f"fb_ph_{qid}")
                     if new_ph != q.get("placeholder",""):
                         q["placeholder"] = new_ph
                         st.session_state.fb_dirty = True
 
                 # Min/Max
-                if qtype in ("number","scale") and not is_sys:
+                if qtype in ("number","scale"):
                     mc1, mc2 = st.columns(2)
                     with mc1:
                         new_min = st.text_input("Nilai Minimum", value=str(q.get("min_value","")), key=f"fb_min_{qid}")
@@ -1360,18 +2100,17 @@ elif page == "Monitoring (Admin)":
                         if new_max != str(q.get("max_value","")):
                             q["max_value"] = new_max; st.session_state.fb_dirty = True
 
-                # Opsi dropdown/radio/checkbox — untuk non-sistem ATAU field sistem yang boleh edit opsi
-                if qtype in ("dropdown","radio","checkbox") and (not is_sys or fid in EDITABLE_OPTIONS_IDS):
+                # Opsi dropdown/radio/checkbox
+                if qtype in ("dropdown","radio","checkbox"):
                     st.markdown("**Pilihan Jawaban** (satu per baris)")
                     current_opts = "\n".join(q.get("options",[]))
                     new_opts_raw = st.text_area("Opsi", value=current_opts, key=f"fb_opts_{qid}", height=120, label_visibility="collapsed")
                     new_opts = [o.strip() for o in new_opts_raw.splitlines() if o.strip()]
                     if new_opts != q.get("options",[]):
                         q["options"] = new_opts; st.session_state.fb_dirty = True
-                    if not is_sys:
-                        allow_other = st.checkbox("Izinkan jawaban 'Lainnya...'", value=q.get("allow_other",False), key=f"fb_other_{qid}")
-                        if allow_other != q.get("allow_other",False):
-                            q["allow_other"] = allow_other; st.session_state.fb_dirty = True
+                    allow_other = st.checkbox("Izinkan jawaban 'Lainnya...'", value=q.get("allow_other",False), key=f"fb_other_{qid}")
+                    if allow_other != q.get("allow_other",False):
+                        q["allow_other"] = allow_other; st.session_state.fb_dirty = True
 
         # Hapus setelah iterasi
         if to_delete is not None:
