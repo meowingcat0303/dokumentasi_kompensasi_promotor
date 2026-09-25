@@ -1032,15 +1032,16 @@ if _PAGE == "admin":
             with col_title:
                 st.markdown(f"### ✏️ Edit Form: **{meta['form_name']}**")
 
-            # Link form
+            # Link form — ambil dari URL browser via st.context (Streamlit >= 1.37) atau fallback
             try:
-                base = st.get_option("browser.serverAddress") or "localhost"
-                port = st.get_option("browser.serverPort") or 8501
-                form_link = f"http://{base}:{port}/?form={fid}"
+                _host = st.context.headers.get("host", "")
+                _proto = "https" if "streamlit.app" in _host or "https" in _host else "http"
+                form_link = f"{_proto}://{_host}/?form={fid}"
             except Exception:
-                form_link = f"/?form={fid}"
+                form_link = f"https://docupromotor.streamlit.app/?form={fid}"
 
-            st.info(f"🔗 **Link Form Publik:** `?form={fid}`\n\nSalin URL browser ini dan ganti akhirannya dengan `?form={fid}`")
+            st.info(f"🔗 **Link Form Publik:**\n\n`{form_link}`")
+            st.code(form_link, language=None)
 
             # Info spreadsheet
             with st.expander("📊 Pengaturan Spreadsheet & Info Form", expanded=True):
@@ -1556,7 +1557,13 @@ if _PAGE == "admin":
                         st.caption(f"ID: `{fm['form_id']}` | Dibuat: {fm.get('created_at','?')} | {status}")
                         if fm.get("description"):
                             st.markdown(fm["description"])
-                        st.info(f"🔗 Link form: tambahkan `?form={fm['form_id']}` ke URL aplikasi ini")
+                        try:
+                            _h = st.context.headers.get("host", "docupromotor.streamlit.app")
+                            _p = "https" if "streamlit.app" in _h else "http"
+                            _fl = f"{_p}://{_h}/?form={fm['form_id']}"
+                        except Exception:
+                            _fl = f"https://docupromotor.streamlit.app/?form={fm['form_id']}"
+                        st.code(_fl, language=None)
                         fc1, fc2, fc3 = st.columns(3)
                         with fc1:
                             if st.button("✏️ Edit Form", key=f"fm_edit_{fi}", type="primary", use_container_width=True):
