@@ -432,9 +432,6 @@ def load_forms_list() -> list:
                 "created_at":     d.get("created_at", ""),
                 "active":         d.get("active", "true").lower() != "false",
                 "apps_script_url": d.get("apps_script_url", ""),
-                "termin_months":  int(d.get("termin_months", "") or TERMIN_MONTHS),
-                "reminder_days":  int(d.get("reminder_days", "") or REMINDER_DAYS),
-                "has_termin":     d.get("has_termin", "false").lower() == "true",
             })
         return result
     except Exception:
@@ -447,7 +444,7 @@ def save_forms_list(forms: list):
         ws = wb.worksheet(FORMS_LIST_TAB)
     except Exception:
         ws = wb.add_worksheet(title=FORMS_LIST_TAB, rows=200, cols=10)
-    headers = ["form_id", "form_name", "description", "spreadsheet_url", "created_at", "active", "apps_script_url", "termin_months", "reminder_days", "has_termin"]
+    headers = ["form_id", "form_name", "description", "spreadsheet_url", "created_at", "active", "apps_script_url"]
     rows = [headers]
     for f in forms:
         rows.append([
@@ -458,9 +455,6 @@ def save_forms_list(forms: list):
             f.get("created_at", ""),
             str(f.get("active", True)).lower(),
             f.get("apps_script_url", ""),
-            str(f.get("termin_months", TERMIN_MONTHS)),
-            str(f.get("reminder_days", REMINDER_DAYS)),
-            str(f.get("has_termin", False)).lower(),
         ])
     ws.clear()
     ws.update(rows, "A1")
@@ -678,20 +672,20 @@ def add_months(d: datetime.date, months: int) -> datetime.date:
     day = min(d.day, calendar.monthrange(year, month)[1])
     return datetime.date(year, month, day)
 
-def compute_deadline(date_str: str, activity: str, termin_months: int = TERMIN_MONTHS) -> datetime.date | None:
+def compute_deadline(date_str: str, activity: str) -> datetime.date | None:
     try:
         d = datetime.date.fromisoformat(str(date_str).strip())
-        return add_months(d, termin_months)
+        return add_months(d, TERMIN_MONTHS)
     except Exception:
         return None
 
-def countdown_label(deadline: datetime.date, today: datetime.date, reminder_days: int = REMINDER_DAYS) -> tuple[str, bool]:
+def countdown_label(deadline: datetime.date, today: datetime.date) -> tuple[str, bool]:
     delta = (deadline - today).days
     if delta < 0:
         return f"Lewat {abs(delta)} hari", True
     elif delta == 0:
         return "Hari ini!", True
-    elif delta <= reminder_days:
+    elif delta <= REMINDER_DAYS:
         months_left = delta // 30
         days_left   = delta % 30
         if months_left > 0:
@@ -746,7 +740,7 @@ function getLocation() {
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG & NAVIGATION
 # ══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="Admin Panel", layout="centered")
+st.set_page_config(page_title="Dokumentasi Investment Lapangan", layout="centered")
 
 # ── Routing berbasis query params ─────────────────────────────────────────────
 _qp        = st.query_params
@@ -755,10 +749,18 @@ _form_id   = _qp.get("form", "")        # form ID publik
 
 if _form_id:
     _PAGE = "public_form"
-elif "inputdokumentasipromotor" in _qp:
-    _PAGE = "input"
-else:
+elif _mode == "admin":
     _PAGE = "admin"
+else:
+    _PAGE = "input"
+    # Sidebar hanya untuk mode default
+    page = st.sidebar.radio(
+        "Menu",
+        ["Input Dokumentasi", "Monitoring (Admin)"],
+        key="nav_page",
+    )
+    if page == "Monitoring (Admin)":
+        _PAGE = "admin_sidebar"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — INPUT DOKUMENTASI
@@ -1183,7 +1185,7 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: PUBLIC FORM  (?form=<form_id>)
 # ══════════════════════════════════════════════════════════════════════════════
-if _PAGE == "public_form":
+elif _PAGE == "public_form":
     @st.cache_data(ttl=30)
     def _get_form_meta(fid):
         forms = load_forms_list()
@@ -1208,12 +1210,6 @@ if _PAGE == "public_form":
         st.warning("Form ini belum memiliki pertanyaan.")
         st.stop()
 
-    # Counter untuk reset semua widget key setelah submit
-    _run_key = f"pf_run_{_form_id}"
-    if _run_key not in st.session_state:
-        st.session_state[_run_key] = 0
-    _r = st.session_state[_run_key]
-
     pf_answers = {}
 
     def _render_pf_field(q):
@@ -1224,53 +1220,53 @@ if _PAGE == "public_form":
             st.caption(q["description"])
 
         if qtype == "text":
-            pf_answers[qid] = st.text_input(label, placeholder=q.get("placeholder",""), key=f"pf_{_r}_{qid}")
+            pf_answers[qid] = st.text_input(label, placeholder=q.get("placeholder",""), key=f"pf_{qid}")
         elif qtype == "textarea":
-            pf_answers[qid] = st.text_area(label, placeholder=q.get("placeholder",""), key=f"pf_{_r}_{qid}")
+            pf_answers[qid] = st.text_area(label, placeholder=q.get("placeholder",""), key=f"pf_{qid}")
         elif qtype == "number":
             min_v = float(q["min_value"]) if q.get("min_value") else None
             max_v = float(q["max_value"]) if q.get("max_value") else None
-            pf_answers[qid] = st.number_input(label, min_value=min_v, max_value=max_v, key=f"pf_{_r}_{qid}")
+            pf_answers[qid] = st.number_input(label, min_value=min_v, max_value=max_v, key=f"pf_{qid}")
         elif qtype == "date":
-            pf_answers[qid] = str(st.date_input(label, key=f"pf_{_r}_{qid}"))
+            pf_answers[qid] = str(st.date_input(label, key=f"pf_{qid}"))
         elif qtype == "time":
-            pf_answers[qid] = str(st.time_input(label, key=f"pf_{_r}_{qid}"))
+            pf_answers[qid] = str(st.time_input(label, key=f"pf_{qid}"))
         elif qtype == "dropdown":
             opts = ["— Pilih —"] + q.get("options", [])
             if q.get("allow_other"):
                 opts.append("Lainnya...")
-            sel = st.selectbox(label, opts, key=f"pf_{_r}_{qid}")
+            sel = st.selectbox(label, opts, key=f"pf_{qid}")
             if sel == "Lainnya...":
-                sel = st.text_input("Sebutkan:", key=f"pf_{_r}_{qid}_other")
+                sel = st.text_input("Sebutkan:", key=f"pf_{qid}_other")
             pf_answers[qid] = sel if sel != "— Pilih —" else ""
         elif qtype == "radio":
             opts = q.get("options", [])
             if q.get("allow_other"):
                 opts = opts + ["Lainnya..."]
-            sel = st.radio(label, opts, key=f"pf_{_r}_{qid}", horizontal=True)
+            sel = st.radio(label, opts, key=f"pf_{qid}", horizontal=True)
             if sel == "Lainnya...":
-                sel = st.text_input("Sebutkan:", key=f"pf_{_r}_{qid}_other")
+                sel = st.text_input("Sebutkan:", key=f"pf_{qid}_other")
             pf_answers[qid] = sel or ""
         elif qtype == "checkbox":
             selected_opts = []
             st.markdown(f"**{label}**")
             for opt in q.get("options", []):
-                if st.checkbox(opt, key=f"pf_{_r}_{qid}_{opt}"):
+                if st.checkbox(opt, key=f"pf_{qid}_{opt}"):
                     selected_opts.append(opt)
             if q.get("allow_other"):
-                other_val = st.text_input("Lainnya:", key=f"pf_{_r}_{qid}_other")
+                other_val = st.text_input("Lainnya:", key=f"pf_{qid}_other")
                 if other_val:
                     selected_opts.append(other_val)
             pf_answers[qid] = ", ".join(selected_opts)
         elif qtype == "scale":
             min_v = int(q["min_value"]) if q.get("min_value") else 1
             max_v = int(q["max_value"]) if q.get("max_value") else 5
-            pf_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"pf_{_r}_{qid}"))
+            pf_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"pf_{qid}"))
         elif qtype == "yes_no":
-            pf_answers[qid] = "Ya" if st.toggle(label, key=f"pf_{_r}_{qid}") else "Tidak"
+            pf_answers[qid] = "Ya" if st.toggle(label, key=f"pf_{qid}") else "Tidak"
         elif qtype == "photo":
-            up = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"pf_{_r}_{qid}")
-            pf_answers[qid] = up  # simpan file object, bukan string
+            up = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"pf_{qid}")
+            pf_answers[qid] = "[foto]" if up else ""
         elif qtype == "paragraph":
             st.markdown(q.get("description", q["label"]))
 
@@ -1285,107 +1281,40 @@ if _PAGE == "public_form":
 
     st.divider()
 
-    if "pf_submit_info" in st.session_state and st.session_state.get("pf_form_id") == _form_id:
-        info = st.session_state.pf_submit_info
-        foto_errors = info.get("foto_errors", [])
-        if foto_errors:
-            st.warning(
-                "⚠️ Jawaban tersimpan, tetapi **beberapa foto gagal diupload**:\n\n"
-                + "\n".join(f"- {e}" for e in foto_errors)
-                + "\n\nHubungi admin dengan ID di bawah untuk upload ulang."
-            )
-        else:
-            st.success("✅ Jawaban Anda berhasil dikirim! Terima kasih.")
-        st.markdown(f"""
-**Ringkasan pengiriman:**
-
-| | |
-|---|---|
-| ID Unik | `{info['unique_id']}` |
-| Waktu Kirim | {info['waktu']} |
-
-Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau mengisi ulang form.
-""")
-        if st.button("Isi Ulang Form", type="primary"):
-            del st.session_state["pf_submit_info"]
-            del st.session_state["pf_form_id"]
+    if "pf_submitted" in st.session_state and st.session_state.get("pf_form_id") == _form_id:
+        st.success("✅ Jawaban Anda berhasil dikirim! Terima kasih.")
+        if st.button("Isi ulang form"):
+            del st.session_state["pf_submitted"]
             st.rerun()
     else:
-        if st.button("Kirim Jawaban", type="primary", key=f"pf_submit_{_r}"):
+        if st.button("Kirim Jawaban", type="primary", key="pf_submit"):
             errors = []
             for q in visible_qs:
                 if q["required"]:
                     val = pf_answers.get(q["question_id"], "")
-                    # file uploader: cek None; string: cek kosong
-                    if val is None or val == "" or val == "— Pilih —":
+                    if not val or val == "— Pilih —":
                         errors.append(f"'{q['label']}' wajib diisi")
             if errors:
                 for e in errors:
                     st.error(e)
             else:
-                with st.spinner("Mengupload foto dan mengirim jawaban, harap tunggu..."):
+                with st.spinner("Mengirim jawaban..."):
                     try:
-                        ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
-                        uid = str(uuid.uuid4())[:8]
-
-                        # ── Upload foto paralel ───────────────────────────────
-                        script_url = form_meta.get("apps_script_url", "").strip() or APPS_SCRIPT_URL
-                        upload_tasks = {}
-                        for q in visible_qs:
-                            if q["type"] == "photo":
-                                file_obj = pf_answers.get(q["question_id"])
-                                if file_obj is not None:
-                                    fname = f"{ts}_{q['question_id']}_{uid}.jpg"
-                                    upload_tasks[q["question_id"]] = (compress_image(file_obj), fname)
-
-                        upload_results = {}
-                        upload_errors  = []
-
-                        def _pf_upload_one(item):
-                            qid, (data, fname) = item
-                            try:
-                                url = upload_to_drive(data, fname, script_url=script_url)
-                                return qid, url
-                            except Exception as exc:
-                                return qid, f"ERROR: {exc}"
-
-                        if upload_tasks:
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                                for qid, result in pool.map(_pf_upload_one, upload_tasks.items()):
-                                    if isinstance(result, str) and result.startswith("ERROR:"):
-                                        upload_errors.append(f"{qid}: {result[7:]}")
-                                        upload_results[qid] = ""
-                                    else:
-                                        upload_results[qid] = result
-
-                        # ── Ganti file object di pf_answers dengan URL / string ──
-                        final_answers = {}
-                        for q in visible_qs:
-                            qid = q["question_id"]
-                            if q["type"] == "photo":
-                                final_answers[qid] = upload_results.get(qid, "")
-                            else:
-                                final_answers[qid] = str(pf_answers.get(qid, "") or "")
-
                         submit_to_public_spreadsheet(
                             form_meta["spreadsheet_url"],
                             visible_qs,
-                            final_answers,
+                            pf_answers,
                         )
-
-                        submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
-                        st.session_state["pf_submit_info"] = {
-                            "unique_id":   f"{ts}_{uid}",
-                            "waktu":       submit_time,
-                            "foto_errors": upload_errors,
-                        }
+                        st.session_state["pf_submitted"] = True
                         st.session_state["pf_form_id"] = _form_id
-                        st.session_state[_run_key] += 1  # reset semua widget
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Gagal mengirim: {e}")
 
-if _PAGE == "admin":
+elif _PAGE in ("admin", "admin_sidebar"):
+    pass  # handled below
+
+if _PAGE in ("admin", "admin_sidebar"):
 
     st.title("Panel Admin")
 
@@ -1417,8 +1346,9 @@ if _PAGE == "admin":
         st.caption(f"🔗 URL Admin: `?mode=admin` — bagikan hanya ke admin")
 
     # ── Tab Admin ─────────────────────────────────────────────────────────────
-    tab_formmanager, tab_formbuilder, tab_settings = st.tabs([
+    tab_formmanager, tab_monitoring, tab_formbuilder, tab_settings = st.tabs([
         "📋 Form Manager",
+        "📊 Monitoring Submission",
         "📝 Form Builder (Input Dokumentasi)",
         "⚙️ Pengaturan",
     ])
@@ -1454,16 +1384,15 @@ if _PAGE == "admin":
             with col_title:
                 st.markdown(f"### ✏️ Edit Form: **{meta['form_name']}**")
 
-            # Link form — ambil dari URL browser via st.context (Streamlit >= 1.37) atau fallback
+            # Link form
             try:
-                _host = st.context.headers.get("host", "")
-                _proto = "https" if "streamlit.app" in _host or "https" in _host else "http"
-                form_link = f"{_proto}://{_host}/?form={fid}"
+                base = st.get_option("browser.serverAddress") or "localhost"
+                port = st.get_option("browser.serverPort") or 8501
+                form_link = f"http://{base}:{port}/?form={fid}"
             except Exception:
-                form_link = f"https://docupromotor.streamlit.app/?form={fid}"
+                form_link = f"/?form={fid}"
 
-            st.info(f"🔗 **Link Form Publik:**\n\n`{form_link}`")
-            st.code(form_link, language=None)
+            st.info(f"🔗 **Link Form Publik:** `?form={fid}`\n\nSalin URL browser ini dan ganti akhirannya dengan `?form={fid}`")
 
             # Info spreadsheet
             with st.expander("📊 Pengaturan Spreadsheet & Info Form", expanded=True):
@@ -1790,148 +1719,6 @@ if _PAGE == "admin":
                 time.sleep(1)
                 st.rerun()
 
-            st.divider()
-
-            # ── Pengaturan Termin ──────────────────────────────────────────────
-            with st.expander("🗓️ Pengaturan Termin", expanded=False):
-                has_termin = st.toggle(
-                    "Form ini menggunakan sistem Termin (deadline submission berikutnya)",
-                    value=meta.get("has_termin", False),
-                    key="fm_has_termin",
-                )
-                if has_termin != meta.get("has_termin", False):
-                    meta["has_termin"] = has_termin
-
-                if has_termin:
-                    col_t1, col_t2 = st.columns(2)
-                    with col_t1:
-                        new_tm = st.number_input(
-                            "Jarak antar termin (bulan)",
-                            min_value=1, max_value=36,
-                            value=int(meta.get("termin_months", TERMIN_MONTHS)),
-                            key="fm_termin_months",
-                            help="Berapa bulan setelah Termin 1, Termin 2 harus dilakukan.",
-                        )
-                        if new_tm != meta.get("termin_months", TERMIN_MONTHS):
-                            meta["termin_months"] = int(new_tm)
-                    with col_t2:
-                        new_rd = st.number_input(
-                            "Peringatan kuning (hari sebelum deadline)",
-                            min_value=1, max_value=90,
-                            value=int(meta.get("reminder_days", REMINDER_DAYS)),
-                            key="fm_reminder_days",
-                            help="Baris akan ditandai kuning jika deadline <= nilai ini.",
-                        )
-                        if new_rd != meta.get("reminder_days", REMINDER_DAYS):
-                            meta["reminder_days"] = int(new_rd)
-                    st.caption(
-                        f"Saat ini: Termin 2 = **{meta.get('termin_months', TERMIN_MONTHS)} bulan** "
-                        f"setelah Termin 1, peringatan kuning ≤ **{meta.get('reminder_days', REMINDER_DAYS)} hari**."
-                    )
-
-                if st.button("💾 Simpan Pengaturan Termin", key="fm_save_termin", type="primary"):
-                    save_forms_list(fm_forms)
-                    st.session_state.fm_forms = load_forms_list()
-                    st.success("✅ Pengaturan termin disimpan.")
-
-            st.divider()
-
-            # ── Monitoring Submission ──────────────────────────────────────────
-            st.markdown("### 📊 Monitoring Submission")
-
-            _fm_termin_months = int(meta.get("termin_months", TERMIN_MONTHS))
-            _fm_reminder_days = int(meta.get("reminder_days", REMINDER_DAYS))
-            _fm_has_termin    = meta.get("has_termin", False)
-
-            # Load data dari spreadsheet form ini
-            _fm_sheet_url = meta.get("spreadsheet_url", "")
-            if not _fm_sheet_url:
-                st.warning("⚠️ Spreadsheet belum dikonfigurasi untuk form ini.")
-            else:
-                with st.spinner("Memuat data submission..."):
-                    try:
-                        _fm_sheet_id = parse_spreadsheet_id(_fm_sheet_url)
-                        _fm_gc = get_gspread()
-                        _fm_ws = _fm_gc.open_by_key(_fm_sheet_id).sheet1
-                        _fm_df = _sheet_to_df(_fm_ws)
-                    except Exception as _fm_e:
-                        _fm_df = pd.DataFrame()
-                        st.error(f"Gagal memuat data: {_fm_e}")
-
-                if _fm_df.empty:
-                    st.info("Belum ada submission untuk form ini.")
-                else:
-                    _fm_df.columns = [c.strip() for c in _fm_df.columns]
-                    _fm_today = datetime.datetime.now(WIB).date()
-
-                    # Filter
-                    fm_fcols = st.columns(3)
-                    _fm_filters = {}
-                    for _ci, _col in enumerate(_fm_df.columns[:6]):
-                        with fm_fcols[_ci % 3]:
-                            _opts = ["Semua"] + sorted(_fm_df[_col].dropna().unique().tolist())
-                            if len(_opts) <= 20:  # hanya tampilkan filter kalau sedikit opsinya
-                                _fm_filters[_col] = st.selectbox(_col, _opts, key=f"fm_filter_{fid}_{_col}")
-
-                    _fm_view = _fm_df.copy()
-                    for _fc, _fv in _fm_filters.items():
-                        if _fv != "Semua" and _fc in _fm_view.columns:
-                            _fm_view = _fm_view[_fm_view[_fc] == _fv]
-
-                    # Termin deadline jika aktif
-                    if _fm_has_termin:
-                        _date_col   = next((c for c in _fm_view.columns if "tanggal" in c.lower() or "date" in c.lower()), None)
-                        _act_col    = next((c for c in _fm_view.columns if "activity" in c.lower() or "termin" in c.lower()), None)
-                        if _date_col and _act_col:
-                            _deadlines = []
-                            _countdowns = []
-                            _warns = []
-                            _ltypes = []
-                            for _, _row in _fm_view.iterrows():
-                                _act = str(_row.get(_act_col, "")).strip()
-                                _ds  = str(_row.get(_date_col, "")).strip()
-                                _dl  = compute_deadline(_ds, _act, _fm_termin_months)
-                                if _dl is None:
-                                    _deadlines.append(""); _countdowns.append(""); _warns.append(False); _ltypes.append("")
-                                else:
-                                    _ltypes.append("Jatuh Tempo Termin 2" if _act == "Termin 1" else "Kontrak Berakhir")
-                                    _deadlines.append(str(_dl))
-                                    _cd, _wn = countdown_label(_dl, _fm_today, _fm_reminder_days)
-                                    _countdowns.append(_cd); _warns.append(_wn)
-                            _fm_view = _fm_view.copy()
-                            _fm_view["Tipe Deadline"]    = _ltypes
-                            _fm_view["Tanggal Deadline"] = _deadlines
-                            _fm_view["Countdown"]        = _countdowns
-                            _fm_view["_warn"]            = _warns
-
-                            c1, c2, c3 = st.columns(3)
-                            c1.metric("Total Submission", len(_fm_view))
-                            c2.metric("Perlu Perhatian", int(_fm_view["_warn"].sum()))
-                            c3.metric(f"Jarak Termin", f"{_fm_termin_months} bln")
-                        else:
-                            st.info("Kolom tanggal/activity tidak ditemukan untuk kalkulasi termin.")
-                            _fm_view["_warn"] = False
-
-                        # Tabel berwarna
-                        _disp_cols = [c for c in _fm_view.columns if c != "_warn"]
-                        _rows_html = ""
-                        for _, _row in _fm_view[_disp_cols + (["_warn"] if "_warn" in _fm_view.columns else [])].iterrows():
-                            _bg = ' style="background:#fff3cd"' if _row.get("_warn") else ""
-                            _cells = "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{_row[c]}</td>" for c in _disp_cols)
-                            _rows_html += f"<tr{_bg}>{_cells}</tr>"
-                        _hdr_html = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#f0f2f6;text-align:left'>{c}</th>" for c in _disp_cols)
-                        _tbl = f"""<div style="overflow-x:auto;max-height:500px;overflow-y:auto">
-                        <table style="border-collapse:collapse;width:100%;font-size:13px">
-                            <thead><tr>{_hdr_html}</tr></thead>
-                            <tbody>{_rows_html}</tbody>
-                        </table></div>"""
-                        st.components.v1.html(_tbl, height=520, scrolling=True)
-                        st.caption("Baris kuning = deadline sudah dekat atau lewat.")
-                    else:
-                        # Tampil tabel biasa tanpa deadline
-                        st.metric("Total Submission", len(_fm_view))
-                        st.dataframe(_fm_view, use_container_width=True, hide_index=True)
-
         else:
             # ── List semua form ────────────────────────────────────────────────
             col_new, col_reload_fm = st.columns([3, 1])
@@ -1979,13 +1766,7 @@ if _PAGE == "admin":
                         st.caption(f"ID: `{fm['form_id']}` | Dibuat: {fm.get('created_at','?')} | {status}")
                         if fm.get("description"):
                             st.markdown(fm["description"])
-                        try:
-                            _h = st.context.headers.get("host", "docupromotor.streamlit.app")
-                            _p = "https" if "streamlit.app" in _h else "http"
-                            _fl = f"{_p}://{_h}/?form={fm['form_id']}"
-                        except Exception:
-                            _fl = f"https://docupromotor.streamlit.app/?form={fm['form_id']}"
-                        st.code(_fl, language=None)
+                        st.info(f"🔗 Link form: tambahkan `?form={fm['form_id']}` ke URL aplikasi ini")
                         fc1, fc2, fc3 = st.columns(3)
                         with fc1:
                             if st.button("✏️ Edit Form", key=f"fm_edit_{fi}", type="primary", use_container_width=True):
@@ -2008,7 +1789,121 @@ if _PAGE == "admin":
                     st.rerun()
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1: FORM BUILDER (Input Dokumentasi)
+    # TAB 1: MONITORING
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_monitoring:
+        st.subheader("Monitoring Investment")
+        today = datetime.datetime.now(WIB).date()
+
+        with st.spinner("Memuat data..."):
+            df_sub = load_submissions()
+
+        if df_sub.empty:
+            st.warning("Belum ada data submission.")
+        else:
+            df_sub.columns = [c.strip() for c in df_sub.columns]
+
+            st.subheader("Filter")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                eksekutor_list = ["Semua"] + sorted(df_sub["Eksekutor"].dropna().unique().tolist()) if "Eksekutor" in df_sub.columns else ["Semua"]
+                filter_eks = st.selectbox("Eksekutor", eksekutor_list, key="filter_eks")
+
+            with col2:
+                activity_list = ["Semua"] + sorted(df_sub["Activity"].dropna().unique().tolist()) if "Activity" in df_sub.columns else ["Semua"]
+                filter_act = st.selectbox("Activity (Termin)", activity_list, key="filter_act")
+
+            with col3:
+                program_list = ["Semua"] + sorted(df_sub["Program Investment"].dropna().unique().tolist()) if "Program Investment" in df_sub.columns else ["Semua"]
+                filter_prog = st.selectbox("Program", program_list, key="filter_prog")
+
+            df_view = df_sub.copy()
+            if filter_eks  != "Semua" and "Eksekutor"         in df_view.columns: df_view = df_view[df_view["Eksekutor"]         == filter_eks]
+            if filter_act  != "Semua" and "Activity"          in df_view.columns: df_view = df_view[df_view["Activity"]          == filter_act]
+            if filter_prog != "Semua" and "Program Investment" in df_view.columns: df_view = df_view[df_view["Program Investment"] == filter_prog]
+
+            st.divider()
+
+            deadlines   = []
+            countdowns  = []
+            warnings    = []
+            label_types = []
+
+            for _, row in df_view.iterrows():
+                activity = str(row.get("Activity", "")).strip()
+                date_str = str(row.get("Date", "")).strip()
+                deadline = compute_deadline(date_str, activity)
+
+                if deadline is None:
+                    deadlines.append("")
+                    countdowns.append("")
+                    warnings.append(False)
+                    label_types.append("")
+                else:
+                    label_types.append("Jatuh Tempo Termin 2" if activity == "Termin 1" else "Kontrak Berakhir")
+                    deadlines.append(str(deadline))
+                    cd, warn = countdown_label(deadline, today)
+                    countdowns.append(cd)
+                    warnings.append(warn)
+
+            df_view = df_view.copy()
+            df_view["Tipe Deadline"]    = label_types
+            df_view["Tanggal Deadline"] = deadlines
+            df_view["Countdown"]        = countdowns
+            df_view["_warn"]            = warnings
+
+            total_rows   = len(df_view)
+            warn_count   = df_view["_warn"].sum()
+            termin1_done = (df_view["Activity"] == "Termin 1").sum() if "Activity" in df_view.columns else 0
+            termin2_done = (df_view["Activity"] == "Termin 2").sum() if "Activity" in df_view.columns else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Submission", total_rows)
+            c2.metric("Termin 1", termin1_done)
+            c3.metric("Termin 2", termin2_done)
+            c4.metric("Perlu Perhatian", int(warn_count))
+
+            st.divider()
+            st.subheader("Detail Submission & Deadline")
+
+            display_cols = [c for c in [
+                "Date", "Eksekutor", "Program Investment", "Jenis Investment",
+                "Brand", "Activity", "Rayon", "Zona", "Nama Outlet", "Kode Customer",
+                "Tipe Deadline", "Tanggal Deadline", "Countdown",
+            ] if c in df_view.columns]
+
+            st.dataframe(
+                df_view[display_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Countdown": st.column_config.TextColumn("Countdown", help="Kuning = <= 21 hari atau sudah lewat"),
+                }
+            )
+
+            st.caption("Baris dengan latar kuning = deadline <= 21 hari atau sudah lewat.")
+
+            rows_html = ""
+            for _, row in df_view[display_cols + ["_warn"]].iterrows():
+                bg = ' style="background:#fff3cd"' if row["_warn"] else ""
+                cells = "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{row[c]}</td>" for c in display_cols)
+                rows_html += f"<tr{bg}>{cells}</tr>"
+
+            header_html = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#f0f2f6;text-align:left'>{c}</th>" for c in display_cols)
+
+            table_html = f"""
+            <div style="overflow-x:auto;max-height:600px;overflow-y:auto">
+            <table style="border-collapse:collapse;width:100%;font-size:13px">
+                <thead><tr>{header_html}</tr></thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+            </div>
+            """
+            st.components.v1.html(table_html, height=620, scrolling=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2: FORM BUILDER
     # ══════════════════════════════════════════════════════════════════════════
     with tab_formbuilder:
         st.subheader("Form Builder")
@@ -2329,15 +2224,14 @@ if _PAGE == "admin":
 
         st.markdown("### 🔧 Pengaturan Umum")
 
-        with st.expander("🗓️ Pengaturan Deadline Termin (Default Global)"):
-            st.caption(
-                "Nilai default ini dipakai untuk form yang tidak punya pengaturan termin sendiri. "
-                "Untuk mengubah, edit konstanta `TERMIN_MONTHS` dan `REMINDER_DAYS` di App.py dan restart. "
-                "Setiap form dapat di-override via Pengaturan Termin di dalam Form Manager."
-            )
+        with st.expander("🗓️ Pengaturan Deadline Termin"):
             st.info(
-                f"Default global: Jarak antar termin = **{TERMIN_MONTHS} bulan**, "
+                f"Saat ini: Jarak antar termin = **{TERMIN_MONTHS} bulan**, "
                 f"Peringatan kuning = **≤ {REMINDER_DAYS} hari**."
+            )
+            st.caption(
+                "Untuk mengubah nilai ini, edit konstanta `TERMIN_MONTHS` dan `REMINDER_DAYS` "
+                "di bagian atas file App.py, lalu restart aplikasi."
             )
 
         with st.expander("🗑️ Clear Cache"):
