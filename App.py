@@ -431,6 +431,7 @@ def load_forms_list() -> list:
                 "spreadsheet_url": d.get("spreadsheet_url", ""),
                 "created_at":     d.get("created_at", ""),
                 "active":         d.get("active", "true").lower() != "false",
+                "apps_script_url": d.get("apps_script_url", ""),
             })
         return result
     except Exception:
@@ -443,7 +444,7 @@ def save_forms_list(forms: list):
         ws = wb.worksheet(FORMS_LIST_TAB)
     except Exception:
         ws = wb.add_worksheet(title=FORMS_LIST_TAB, rows=200, cols=10)
-    headers = ["form_id", "form_name", "description", "spreadsheet_url", "created_at", "active"]
+    headers = ["form_id", "form_name", "description", "spreadsheet_url", "created_at", "active", "apps_script_url"]
     rows = [headers]
     for f in forms:
         rows.append([
@@ -453,6 +454,7 @@ def save_forms_list(forms: list):
             f.get("spreadsheet_url", ""),
             f.get("created_at", ""),
             str(f.get("active", True)).lower(),
+            f.get("apps_script_url", ""),
         ])
     ws.clear()
     ws.update(rows, "A1")
@@ -618,15 +620,16 @@ def compress_image(uploaded_file) -> bytes:
 # ── Drive upload ──────────────────────────────────────────────────────────────
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6BrA7TdHiFVfgsPL2b_xGDkWTqBD30tlGWpCXvQ8F2IXIjO/exec"
 
-def upload_to_drive(data: bytes, filename: str, retries: int = 3) -> str:
+def upload_to_drive(data: bytes, filename: str, retries: int = 3, script_url: str = "") -> str:
     """Upload ke Drive via Apps Script. Thread-safe (tanpa st.warning)."""
     import base64
+    target_url = script_url.strip() if script_url.strip() else APPS_SCRIPT_URL
     b64 = base64.b64encode(data).decode("utf-8")
     last_exc = None
     for attempt in range(retries):
         try:
             resp = _requests.post(
-                APPS_SCRIPT_URL,
+                target_url,
                 data={"image": b64, "filename": filename},
                 timeout=120,
             )
@@ -1263,7 +1266,7 @@ elif _PAGE == "public_form":
             pf_answers[qid] = "Ya" if st.toggle(label, key=f"pf_{qid}") else "Tidak"
         elif qtype == "photo":
             up = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"pf_{qid}")
-            pf_answers[qid] = "[foto]" if up else ""
+            pf_answers[qid] = up  # simpan file object, bukan string
         elif qtype == "paragraph":
             st.markdown(q.get("description", q["label"]))
 
@@ -1278,10 +1281,30 @@ elif _PAGE == "public_form":
 
     st.divider()
 
-    if "pf_submitted" in st.session_state and st.session_state.get("pf_form_id") == _form_id:
-        st.success("✅ Jawaban Anda berhasil dikirim! Terima kasih.")
-        if st.button("Isi ulang form"):
-            del st.session_state["pf_submitted"]
+    if "pf_submit_info" in st.session_state and st.session_state.get("pf_form_id") == _form_id:
+        info = st.session_state.pf_submit_info
+        foto_errors = info.get("foto_errors", [])
+        if foto_errors:
+            st.warning(
+                "⚠️ Jawaban tersimpan, tetapi **beberapa foto gagal diupload**:\n\n"
+                + "\n".join(f"- {e}" for e in foto_errors)
+                + "\n\nHubungi admin dengan ID di bawah untuk upload ulang."
+            )
+        else:
+            st.success("✅ Jawaban Anda berhasil dikirim! Terima kasih.")
+        st.markdown(f"""
+**Ringkasan pengiriman:**
+
+| | |
+|---|---|
+| ID Unik | `{info['unique_id']}` |
+| Waktu Kirim | {info['waktu']} |
+
+Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau mengisi ulang form.
+""")
+        if st.button("Isi Ulang Form", type="primary"):
+            del st.session_state["pf_submit_info"]
+            del st.session_state["pf_form_id"]
             st.rerun()
     else:
         if st.button("Kirim Jawaban", type="primary", key="pf_submit"):
@@ -1289,20 +1312,69 @@ elif _PAGE == "public_form":
             for q in visible_qs:
                 if q["required"]:
                     val = pf_answers.get(q["question_id"], "")
-                    if not val or val == "— Pilih —":
+                    # file uploader: cek None; string: cek kosong
+                    if val is None or val == "" or val == "— Pilih —":
                         errors.append(f"'{q['label']}' wajib diisi")
             if errors:
                 for e in errors:
                     st.error(e)
             else:
-                with st.spinner("Mengirim jawaban..."):
+                with st.spinner("Mengupload foto dan mengirim jawaban, harap tunggu..."):
                     try:
+                        ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+                        uid = str(uuid.uuid4())[:8]
+
+                        # ── Upload foto paralel ───────────────────────────────
+                        script_url = form_meta.get("apps_script_url", "").strip() or APPS_SCRIPT_URL
+                        upload_tasks = {}
+                        for q in visible_qs:
+                            if q["type"] == "photo":
+                                file_obj = pf_answers.get(q["question_id"])
+                                if file_obj is not None:
+                                    fname = f"{ts}_{q['question_id']}_{uid}.jpg"
+                                    upload_tasks[q["question_id"]] = (compress_image(file_obj), fname)
+
+                        upload_results = {}
+                        upload_errors  = []
+
+                        def _pf_upload_one(item):
+                            qid, (data, fname) = item
+                            try:
+                                url = upload_to_drive(data, fname, script_url=script_url)
+                                return qid, url
+                            except Exception as exc:
+                                return qid, f"ERROR: {exc}"
+
+                        if upload_tasks:
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                                for qid, result in pool.map(_pf_upload_one, upload_tasks.items()):
+                                    if isinstance(result, str) and result.startswith("ERROR:"):
+                                        upload_errors.append(f"{qid}: {result[7:]}")
+                                        upload_results[qid] = ""
+                                    else:
+                                        upload_results[qid] = result
+
+                        # ── Ganti file object di pf_answers dengan URL / string ──
+                        final_answers = {}
+                        for q in visible_qs:
+                            qid = q["question_id"]
+                            if q["type"] == "photo":
+                                final_answers[qid] = upload_results.get(qid, "")
+                            else:
+                                final_answers[qid] = str(pf_answers.get(qid, "") or "")
+
                         submit_to_public_spreadsheet(
                             form_meta["spreadsheet_url"],
                             visible_qs,
-                            pf_answers,
+                            final_answers,
                         )
-                        st.session_state["pf_submitted"] = True
+
+                        submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
+                        st.session_state["pf_submit_info"] = {
+                            "unique_id":   f"{ts}_{uid}",
+                            "waktu":       submit_time,
+                            "foto_errors": upload_errors,
+                        }
                         st.session_state["pf_form_id"] = _form_id
                         st.rerun()
                     except Exception as e:
@@ -1418,6 +1490,27 @@ if _PAGE in ("admin", "admin_sidebar"):
                     st.caption(f"Sheet ID: `{sid}`")
                 else:
                     st.warning("⚠️ Spreadsheet belum dikonfigurasi. Form tidak bisa menerima jawaban.")
+
+                st.divider()
+                st.markdown("**📷 Konfigurasi Upload Foto** (opsional — isi jika form ada pertanyaan foto)")
+                new_script_url = st.text_input(
+                    "URL Google Apps Script untuk upload foto ke Drive",
+                    value=meta.get("apps_script_url", ""),
+                    key="fm_edit_script_url",
+                    placeholder="https://script.google.com/macros/s/xxx/exec",
+                    help=(
+                        "Diperlukan jika form memiliki pertanyaan bertipe Foto. "
+                        "Buat Apps Script baru di Google Drive, deploy sebagai web app, "
+                        "lalu paste URL-nya di sini. "
+                        "Kosongkan untuk menggunakan URL default (sama dengan Form Input Dokumentasi)."
+                    ),
+                )
+                if new_script_url != meta.get("apps_script_url", ""):
+                    meta["apps_script_url"] = new_script_url
+                if meta.get("apps_script_url"):
+                    st.caption(f"✅ Apps Script URL dikonfigurasi")
+                else:
+                    st.caption(f"ℹ️ Kosong → pakai URL default: `{APPS_SCRIPT_URL[:60]}...`")
 
                 col_sv, col_toggle = st.columns(2)
                 with col_sv:
