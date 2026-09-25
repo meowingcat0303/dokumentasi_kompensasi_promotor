@@ -9,6 +9,7 @@ import json
 import datetime
 import uuid
 import time
+import concurrent.futures
 
 WIB = datetime.timezone(datetime.timedelta(hours=7))
 
@@ -390,21 +391,43 @@ def get_active_sheet_ids() -> tuple[str, str]:
 
 # ── Image utils ───────────────────────────────────────────────────────────────
 def compress_image(uploaded_file) -> bytes:
-    img = Image.open(uploaded_file)
+    """Kompres gambar. Kalau hasil masih >1.5MB, turunkan quality otomatis."""
+    raw = uploaded_file.read() if hasattr(uploaded_file, "read") else uploaded_file
+    img = Image.open(io.BytesIO(raw))
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
+    # Rotasi otomatis sesuai EXIF (penting untuk foto dari kamera HP)
+    try:
+        import PIL.ExifTags as _et
+        exif = img._getexif()
+        if exif:
+            orientation_key = next((k for k, v in _et.TAGS.items() if v == "Orientation"), None)
+            if orientation_key and orientation_key in exif:
+                ori = exif[orientation_key]
+                rotate_map = {3: 180, 6: 270, 8: 90}
+                if ori in rotate_map:
+                    img = img.rotate(rotate_map[ori], expand=True)
+    except Exception:
+        pass
     ratio = IMAGE_MAX_PX / max(img.size)
     if ratio < 1:
         new_size = (int(img.width * ratio), int(img.height * ratio))
         img = img.resize(new_size, Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=IMAGE_QUALITY, optimize=True)
+    # Auto-turunkan quality kalau file masih besar
+    quality = IMAGE_QUALITY
+    for _ in range(3):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        if buf.tell() <= 1_500_000 or quality <= 50:
+            break
+        quality -= 15
     return buf.getvalue()
 
 # ── Drive upload ──────────────────────────────────────────────────────────────
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz27id708tLEcf0eGWNC6BrA7TdHiFVfgsPL2b_xGDkWTqBD30tlGWpCXvQ8F2IXIjO/exec"
 
 def upload_to_drive(data: bytes, filename: str, retries: int = 3) -> str:
+    """Upload ke Drive via Apps Script. Thread-safe (tanpa st.warning)."""
     import base64
     b64 = base64.b64encode(data).decode("utf-8")
     last_exc = None
@@ -413,27 +436,37 @@ def upload_to_drive(data: bytes, filename: str, retries: int = 3) -> str:
             resp = _requests.post(
                 APPS_SCRIPT_URL,
                 data={"image": b64, "filename": filename},
-                timeout=90,
+                timeout=120,
             )
-            if not resp.ok:
-                st.warning(f"Upload attempt {attempt+1} gagal: HTTP {resp.status_code} — {resp.text[:300]}")
-                resp.raise_for_status()
+            resp.raise_for_status()
             result = resp.json()
             if result.get("success"):
                 return result["url"]
             raise ValueError(f"Apps Script error: {result}")
-        except (_requests.exceptions.HTTPError, _requests.exceptions.Timeout) as e:
+        except Exception as e:
             last_exc = e
             if attempt < retries - 1:
-                time.sleep(3 * (attempt + 1))
+                time.sleep(2 * (attempt + 1))
                 continue
-            raise last_exc
+    raise last_exc
 
 # ── Submission writer ─────────────────────────────────────────────────────────
-def append_submission(row: list):
-    gc = get_gspread()
-    ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
-    ws.append_row(row, value_input_option="USER_ENTERED")
+def append_submission(row: list, retries: int = 3):
+    """Tulis baris ke sheet Submission dengan retry."""
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            gc = get_gspread()
+            ws = gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
+            ws.append_row(row, value_input_option="USER_ENTERED")
+            return
+        except Exception as e:
+            last_exc = e
+            if attempt < retries - 1:
+                get_gspread.clear()  # reset koneksi
+                time.sleep(2 * (attempt + 1))
+                continue
+    raise last_exc
 
 # ── Termin / deadline logic ───────────────────────────────────────────────────
 def add_months(d: datetime.date, months: int) -> datetime.date:
@@ -529,7 +562,15 @@ if page == "Input Dokumentasi":
 
     if "submit_info" in st.session_state:
         info = st.session_state.submit_info
-        st.success("Dokumentasi berhasil dikirim dan tersimpan.")
+        foto_errors = info.get("foto_errors", [])
+        if foto_errors:
+            st.warning(
+                "⚠️ Data tersimpan, tetapi **beberapa foto gagal diupload**:\n\n"
+                + "\n".join(f"- {e}" for e in foto_errors)
+                + "\n\nHubungi admin dengan ID di bawah untuk upload ulang."
+            )
+        else:
+            st.success("✅ Dokumentasi berhasil dikirim dan tersimpan.")
         st.markdown(f"""
 **Ringkasan pengiriman:**
 
@@ -826,37 +867,64 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                 st.error(e)
         else:
             with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
-                ts  = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
-                uid = str(uuid.uuid4())[:8]
+                ts   = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+                uid  = str(uuid.uuid4())[:8]
                 kode = selected_customer.get(code_col, "unknown") if selected_customer else "unknown"
 
-                def safe_upload(file, label):
+                # ── Kumpulkan semua foto yang perlu diupload ──────────────────
+                upload_tasks = {}  # key → (bytes, filename)
+
+                def _prep(file, label):
                     if file is None:
-                        return ""
+                        return
                     fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
-                    time.sleep(1)
-                    return upload_to_drive(compress_image(file), fname)
+                    upload_tasks[label] = (compress_image(file), fname)
 
-                url_ktp      = safe_upload(foto_ktp,      "ktp")
-                url_sunblind = safe_upload(foto_sunblind, "sunblind")
-                url_display  = safe_upload(foto_display,  "display")
-                url_kompens  = safe_upload(foto_kompens,  "kompensasi")
+                _prep(foto_ktp,      "ktp")
+                _prep(foto_sunblind, "sunblind")
+                _prep(foto_display,  "display")
+                _prep(foto_kompens,  "kompensasi")
 
-                # Upload foto dari pertanyaan bebas
-                extra_answers_str = {}
                 free_visible = [q for q in visible_questions if not q.get("field_id")]
+                extra_answers_str = {}
                 for q in free_visible:
                     qid = q["question_id"]
                     val = extra_answers.get(qid, "")
                     if q["type"] == "photo" and val is not None:
-                        extra_answers_str[qid] = safe_upload(val, f"extra_{qid}")
+                        _prep(val, f"extra_{qid}")
                     else:
                         extra_answers_str[qid] = str(val) if val else ""
+
+                # ── Upload paralel ─────────────────────────────────────────────
+                upload_results = {}   # key → url atau ""
+                upload_errors  = []   # label foto yang gagal (non-fatal)
+
+                def _upload_one(item):
+                    label, (data, fname) = item
+                    try:
+                        url = upload_to_drive(data, fname)
+                        return label, url
+                    except Exception as exc:
+                        return label, f"ERROR: {exc}"
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = pool.map(_upload_one, upload_tasks.items())
+                    for label, result in futures:
+                        if isinstance(result, str) and result.startswith("ERROR:"):
+                            upload_errors.append(f"{label}: {result[7:]}")
+                            upload_results[label] = ""
+                        else:
+                            upload_results[label] = result
+
+                # Isi extra_answers_str untuk foto bebas
+                for q in free_visible:
+                    qid = q["question_id"]
+                    if q["type"] == "photo":
+                        extra_answers_str[qid] = upload_results.get(f"extra_{qid}", "")
 
                 unique_id   = f"{ts}_{uid}"
                 submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
 
-                # Bangun row: kolom sistem tetap (backward compatible) + kolom ekstra
                 row = [
                     unique_id,
                     str(tgl),
@@ -869,10 +937,10 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                     zona_final,
                     selected_customer.get(name_col, "") if selected_customer else "",
                     kode,
-                    url_sunblind,
-                    url_display,
-                    url_kompens,
-                    url_ktp,
+                    upload_results.get("sunblind", ""),
+                    upload_results.get("display",  ""),
+                    upload_results.get("kompensasi", ""),
+                    upload_results.get("ktp",      ""),
                     st.session_state.gps_coords,
                     catatan,
                     submit_time,
@@ -880,16 +948,28 @@ Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan inpu
                 for q in free_visible:
                     row.append(extra_answers_str.get(q["question_id"], ""))
 
-                append_submission(row)
+                # ── Simpan ke Sheets (dengan retry) ───────────────────────────
+                try:
+                    append_submission(row)
+                except Exception as exc:
+                    st.error(
+                        f"❌ Data gagal tersimpan ke Sheets: {exc}\n\n"
+                        f"**ID unik submission Anda: `{unique_id}`** — screenshot ini dan hubungi admin."
+                    )
+                    st.stop()
+
+                # ── Sukses — tampilkan peringatan foto gagal (non-fatal) ───────
                 st.session_state.submit_info = {
                     "unique_id": unique_id,
-                    "outlet": selected_customer.get(name_col, "-") if selected_customer else "-",
-                    "kode": kode,
-                    "promotor": promotor,
-                    "waktu": submit_time,
+                    "outlet":    selected_customer.get(name_col, "-") if selected_customer else "-",
+                    "kode":      kode,
+                    "promotor":  promotor,
+                    "waktu":     submit_time,
+                    "foto_errors": upload_errors,
                 }
                 st.session_state.gps_coords = ""
-                st.cache_data.clear()
+                # Hanya clear cache submission, bukan semua cache
+                load_submissions.clear()
                 st.rerun()
 
 
