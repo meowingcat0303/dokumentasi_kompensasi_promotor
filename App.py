@@ -755,8 +755,430 @@ _form_id   = _qp.get("form", "")        # form ID publik
 
 if _form_id:
     _PAGE = "public_form"
+elif "inputdokumentasipromotor" in _qp:
+    _PAGE = "input"
 else:
     _PAGE = "admin"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 1 — INPUT DOKUMENTASI
+# ══════════════════════════════════════════════════════════════════════════════
+if _PAGE == "input":
+
+    st.title("Dokumentasi Investment Lapangan")
+
+    if "submit_info" in st.session_state:
+        info = st.session_state.submit_info
+        foto_errors = info.get("foto_errors", [])
+        if foto_errors:
+            st.warning(
+                "⚠️ Data tersimpan, tetapi **beberapa foto gagal diupload**:\n\n"
+                + "\n".join(f"- {e}" for e in foto_errors)
+                + "\n\nHubungi admin dengan ID di bawah untuk upload ulang."
+            )
+        else:
+            st.success("✅ Dokumentasi berhasil dikirim dan tersimpan.")
+        st.markdown(f"""
+**Ringkasan pengiriman:**
+
+| | |
+|---|---|
+| ID Unik | `{info['unique_id']}` |
+| Outlet | {info['outlet']} ({info['kode']}) |
+| Eksekutor | {info['promotor']} |
+| Waktu Kirim | {info['waktu']} |
+
+Data sudah masuk ke sistem. Anda dapat menutup halaman ini atau melanjutkan input baru.
+""")
+        if st.button("Input Dokumentasi Baru", type="primary"):
+            del st.session_state["submit_info"]
+            st.rerun()
+        st.stop()
+
+    with st.spinner("Memuat data..."):
+        promotors, rayon_list, zona_list = load_all_config()
+        df_cust, meta = load_customers()
+        all_questions = load_form_config()
+
+    code_col           = meta["code_col"]
+    name_col           = meta["name_col"]
+    addr_col           = meta["addr_col"]
+    sales_group_col    = meta["sales_group_col"]
+    sales_district_col = meta["sales_district_col"]
+
+    st.caption(f"Data customer: **{meta['n_aktif']:,} toko aktif** dari {meta['n_total']:,} total")
+
+    if "gps_coords" not in st.session_state:
+        st.session_state.gps_coords = ""
+
+    # Variabel untuk field sistem — diisi saat render pertanyaan
+    _vals = {
+        "tgl": datetime.datetime.now(WIB).date(),
+        "promotor": "—",
+        "program": "—",
+        "jenis": "—",
+        "brand": "—",
+        "activity": "—",
+        "selected_customer": None,
+        "rayon_final": "",
+        "zona_final": "",
+        "foto_ktp": None,
+        "foto_sunblind": None,
+        "foto_display": None,
+        "foto_kompens": None,
+        "catatan": "",
+    }
+    extra_answers = {}
+    _vals["_customer_rendered"] = False  # pastikan rayon/zona mode hanya render sekali
+
+    visible_questions = [q for q in all_questions if q.get("visible", True)]
+
+    # ── Helper: render field sistem ───────────────────────────────────────────
+    def _render_system_field(q):
+        fid   = q.get("field_id", "")
+        label = q["label"] + (" *" if q["required"] else " (opsional)")
+        opts  = q.get("options", [])
+
+        if fid == "tanggal":
+            _vals["tgl"] = st.date_input(label, value=datetime.datetime.now(WIB).date(), key="tgl_sel")
+
+        elif fid == "promotor":
+            _vals["promotor"] = st.selectbox(label, ["— Pilih —"] + promotors, key="promotor_sel")
+
+        elif fid == "program":
+            _vals["program"] = st.selectbox(label, ["— Pilih —"] + (opts or PROGRAM_OPTIONS), key="program_sel")
+
+        elif fid == "jenis":
+            _vals["jenis"] = st.selectbox(label, ["— Pilih —"] + (opts or JENIS_OPTIONS), key="jenis_sel")
+
+        elif fid == "brand":
+            _vals["brand"] = st.selectbox(label, ["— Pilih —"] + (opts or BRAND_OPTIONS), key="brand_sel")
+
+        elif fid == "activity":
+            _vals["activity"] = st.selectbox(label, ["— Pilih —"] + (opts or ACTIVITY_OPTIONS), key="activity_sel")
+
+        elif fid == "customer":
+            if not _vals["_customer_rendered"]:
+                _vals["_customer_rendered"] = True
+                st.radio(
+                    "Mode Rayon & Zona:",
+                    ["Otomatis (dari data customer)", "Manual (pilih sendiri)"],
+                    key="rayon_zona_mode",
+                    horizontal=True,
+                )
+            mode_otomatis = st.session_state.get("rayon_zona_mode", "Otomatis (dari data customer)") == "Otomatis (dari data customer)"
+            if not mode_otomatis:
+                col_r, col_z = st.columns(2)
+                with col_r:
+                    rayon_sel = st.selectbox("Rayon", ["— Pilih —"] + rayon_list, key="rayon_sel")
+                with col_z:
+                    zona_sel = st.selectbox("Zona", ["— Pilih —"] + zona_list, key="zona_sel")
+            if df_cust.empty:
+                st.error("Data customer tidak ditemukan.")
+                st.stop()
+            chosen_label = st.selectbox(
+                label,
+                options=["— Pilih —"] + df_cust["_label"].tolist(),
+                key="cust_sel",
+            )
+            if chosen_label != "— Pilih —":
+                match = df_cust[df_cust["_label"] == chosen_label]
+                if not match.empty:
+                    cust = match.iloc[0].to_dict()
+                    _vals["selected_customer"] = cust
+                    if mode_otomatis:
+                        _vals["rayon_final"] = str(cust[sales_group_col]).strip() if sales_group_col else ""
+                        _vals["zona_final"]  = str(cust[sales_district_col]).strip() if sales_district_col else ""
+                        col_r, col_z = st.columns(2)
+                        with col_r:
+                            st.info(f"**Rayon:** {_vals['rayon_final'] or '—'}")
+                        with col_z:
+                            st.info(f"**Zona:** {_vals['zona_final'] or '—'}")
+                    else:
+                        _vals["rayon_final"] = rayon_sel if rayon_sel != "— Pilih —" else ""
+                        _vals["zona_final"]  = zona_sel  if zona_sel  != "— Pilih —" else ""
+                    st.success(
+                        f"**{cust[name_col]}** ({cust[code_col]})"
+                        + (f" — {cust[addr_col]}" if addr_col else "")
+                    )
+
+        elif fid == "gps":
+            st.markdown(f"**{q['label']}**")
+            st.components.v1.html(GPS_JS, height=90)
+            gps_input = st.text_input(
+                "koordinat_gps",
+                value=st.session_state.gps_coords,
+                key="gps_manual",
+                placeholder="Klik tombol di atas untuk mengisi otomatis",
+                label_visibility="collapsed",
+            )
+            if gps_input:
+                st.session_state.gps_coords = gps_input
+
+        elif fid == "foto_ktp":
+            _vals["foto_ktp"] = st.file_uploader(label, type=["jpg","jpeg","png"], key="foto_ktp")
+            st.caption("Foto dikompres otomatis (max 1920px, JPEG 75%).")
+
+        elif fid == "foto_sunblind":
+            _vals["foto_sunblind"] = st.file_uploader(label, type=["jpg","jpeg","png"], key="foto_sunblind")
+
+        elif fid == "foto_display":
+            _vals["foto_display"] = st.file_uploader(label, type=["jpg","jpeg","png"], key="foto_display")
+
+        elif fid == "foto_kompens":
+            _vals["foto_kompens"] = st.file_uploader(label, type=["jpg","jpeg","png"], key="foto_kompens")
+
+        elif fid == "catatan":
+            _vals["catatan"] = st.text_area(label, key="catatan_input")
+
+    # ── Helper: render pertanyaan bebas ───────────────────────────────────────
+    def _render_free_field(q):
+        qid   = q["question_id"]
+        qtype = q["type"]
+        label = q["label"] + (" *" if q["required"] else " (opsional)")
+        desc  = q.get("description", "")
+        if desc:
+            st.caption(desc)
+
+        if qtype == "text":
+            extra_answers[qid] = st.text_input(label, placeholder=q.get("placeholder",""), key=f"eq_{qid}")
+        elif qtype == "textarea":
+            extra_answers[qid] = st.text_area(label, placeholder=q.get("placeholder",""), key=f"eq_{qid}")
+        elif qtype == "number":
+            min_v = float(q["min_value"]) if q.get("min_value") else None
+            max_v = float(q["max_value"]) if q.get("max_value") else None
+            extra_answers[qid] = st.number_input(label, min_value=min_v, max_value=max_v, key=f"eq_{qid}")
+        elif qtype == "date":
+            extra_answers[qid] = str(st.date_input(label, key=f"eq_{qid}"))
+        elif qtype == "time":
+            extra_answers[qid] = str(st.time_input(label, key=f"eq_{qid}"))
+        elif qtype == "dropdown":
+            opts = ["— Pilih —"] + q.get("options", [])
+            if q.get("allow_other"):
+                opts.append("Lainnya...")
+            sel = st.selectbox(label, opts, key=f"eq_{qid}")
+            if sel == "Lainnya...":
+                sel = st.text_input("Sebutkan:", key=f"eq_{qid}_other")
+            extra_answers[qid] = sel if sel != "— Pilih —" else ""
+        elif qtype == "radio":
+            opts = q.get("options", [])
+            if q.get("allow_other"):
+                opts = opts + ["Lainnya..."]
+            sel = st.radio(label, opts, key=f"eq_{qid}", horizontal=True)
+            if sel == "Lainnya...":
+                sel = st.text_input("Sebutkan:", key=f"eq_{qid}_other")
+            extra_answers[qid] = sel or ""
+        elif qtype == "checkbox":
+            opts = q.get("options", [])
+            selected_opts = []
+            st.markdown(f"**{label}**")
+            for opt in opts:
+                if st.checkbox(opt, key=f"eq_{qid}_{opt}"):
+                    selected_opts.append(opt)
+            if q.get("allow_other"):
+                other_val = st.text_input("Lainnya:", key=f"eq_{qid}_other")
+                if other_val:
+                    selected_opts.append(other_val)
+            extra_answers[qid] = ", ".join(selected_opts)
+        elif qtype == "scale":
+            min_v = int(q["min_value"]) if q.get("min_value") else 1
+            max_v = int(q["max_value"]) if q.get("max_value") else 5
+            extra_answers[qid] = str(st.slider(label, min_value=min_v, max_value=max_v, key=f"eq_{qid}"))
+        elif qtype == "photo":
+            uploaded = st.file_uploader(label, type=["jpg","jpeg","png"], key=f"eq_{qid}")
+            extra_answers[qid] = uploaded
+        elif qtype == "yes_no":
+            extra_answers[qid] = "Ya" if st.toggle(label, key=f"eq_{qid}") else "Tidak"
+
+    # ── Render semua pertanyaan sesuai urutan ─────────────────────────────────
+    current_section = None
+    for q in visible_questions:
+        sec = q.get("section", "")
+        if sec and sec != current_section:
+            st.divider()
+            st.subheader(sec)
+            current_section = sec
+        fid = q.get("field_id", "")
+        if fid:
+            _render_system_field(q)
+        else:
+            _render_free_field(q)
+
+    st.divider()
+
+    # Shorthand untuk submit
+    tgl              = _vals["tgl"]
+    promotor         = _vals["promotor"]
+    program          = _vals["program"]
+    jenis            = _vals["jenis"]
+    brand            = _vals["brand"]
+    activity         = _vals["activity"]
+    selected_customer = _vals["selected_customer"]
+    rayon_final      = _vals["rayon_final"]
+    zona_final       = _vals["zona_final"]
+    foto_ktp         = _vals["foto_ktp"]
+    foto_sunblind    = _vals["foto_sunblind"]
+    foto_display     = _vals["foto_display"]
+    foto_kompens     = _vals["foto_kompens"]
+    catatan          = _vals["catatan"]
+
+    # Cari field sistem yang visible & required dari config
+    def _q_visible(fid): return any(q.get("field_id")==fid and q.get("visible",True) for q in all_questions)
+    def _q_required(fid): return any(q.get("field_id")==fid and q.get("required",True) for q in all_questions)
+    def _q_label(fid, default): 
+        for q in all_questions:
+            if q.get("field_id") == fid:
+                return q.get("label", default)
+        return default
+
+    # Submit
+    if st.button("Submit Dokumentasi", key="btn_submit", type="primary"):
+        errors = []
+        if _q_visible("promotor") and _q_required("promotor") and promotor == "— Pilih —":
+            errors.append(f"{_q_label('promotor','Eksekutor')} wajib dipilih")
+        if _q_visible("program") and _q_required("program") and program == "— Pilih —":
+            errors.append(f"{_q_label('program','Program Investment')} wajib dipilih")
+        if _q_visible("jenis") and _q_required("jenis") and jenis == "— Pilih —":
+            errors.append(f"{_q_label('jenis','Jenis Investment')} wajib dipilih")
+        if _q_visible("brand") and _q_required("brand") and brand == "— Pilih —":
+            errors.append(f"{_q_label('brand','Brand')} wajib dipilih")
+        if _q_visible("activity") and _q_required("activity") and activity == "— Pilih —":
+            errors.append(f"{_q_label('activity','Activity')} wajib dipilih")
+        if _q_visible("customer") and _q_required("customer") and not selected_customer:
+            errors.append(f"{_q_label('customer','Customer')} belum dipilih")
+        if _q_visible("customer") and selected_customer and not rayon_final:
+            errors.append("Rayon tidak ditemukan / belum dipilih")
+        if _q_visible("customer") and selected_customer and not zona_final:
+            errors.append("Zona tidak ditemukan / belum dipilih")
+        if _q_visible("foto_ktp") and _q_required("foto_ktp") and not foto_ktp:
+            errors.append(f"{_q_label('foto_ktp','Foto KTP')} wajib diupload")
+        if _q_visible("foto_sunblind") and _q_required("foto_sunblind") and not foto_sunblind:
+            errors.append(f"{_q_label('foto_sunblind','Foto Sunblind')} wajib diupload")
+        if _q_visible("foto_kompens") and _q_required("foto_kompens") and not foto_kompens:
+            errors.append(f"{_q_label('foto_kompens','Foto Bukti Kompensasi')} wajib diupload")
+
+        # Validasi pertanyaan bebas yang wajib
+        free_visible = [q for q in visible_questions if not q.get("field_id")]
+        for q in free_visible:
+            if q["required"]:
+                qid = q["question_id"]
+                val = extra_answers.get(qid, "")
+                if q["type"] == "photo":
+                    if val is None:
+                        errors.append(f"'{q['label']}' wajib diisi")
+                elif not val or val == "— Pilih —":
+                    errors.append(f"'{q['label']}' wajib diisi")
+
+        if errors:
+            for e in errors:
+                st.error(e)
+        else:
+            with st.spinner("Mengupload foto dan menyimpan data, harap tunggu..."):
+                ts   = datetime.datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+                uid  = str(uuid.uuid4())[:8]
+                kode = selected_customer.get(code_col, "unknown") if selected_customer else "unknown"
+
+                # ── Kumpulkan semua foto yang perlu diupload ──────────────────
+                upload_tasks = {}  # key → (bytes, filename)
+
+                def _prep(file, label):
+                    if file is None:
+                        return
+                    fname = f"{ts}_{kode}_{promotor}_{label}_{uid}.jpg"
+                    upload_tasks[label] = (compress_image(file), fname)
+
+                _prep(foto_ktp,      "ktp")
+                _prep(foto_sunblind, "sunblind")
+                _prep(foto_display,  "display")
+                _prep(foto_kompens,  "kompensasi")
+
+                free_visible = [q for q in visible_questions if not q.get("field_id")]
+                extra_answers_str = {}
+                for q in free_visible:
+                    qid = q["question_id"]
+                    val = extra_answers.get(qid, "")
+                    if q["type"] == "photo" and val is not None:
+                        _prep(val, f"extra_{qid}")
+                    else:
+                        extra_answers_str[qid] = str(val) if val else ""
+
+                # ── Upload paralel ─────────────────────────────────────────────
+                upload_results = {}   # key → url atau ""
+                upload_errors  = []   # label foto yang gagal (non-fatal)
+
+                def _upload_one(item):
+                    label, (data, fname) = item
+                    try:
+                        url = upload_to_drive(data, fname)
+                        return label, url
+                    except Exception as exc:
+                        return label, f"ERROR: {exc}"
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = pool.map(_upload_one, upload_tasks.items())
+                    for label, result in futures:
+                        if isinstance(result, str) and result.startswith("ERROR:"):
+                            upload_errors.append(f"{label}: {result[7:]}")
+                            upload_results[label] = ""
+                        else:
+                            upload_results[label] = result
+
+                # Isi extra_answers_str untuk foto bebas
+                for q in free_visible:
+                    qid = q["question_id"]
+                    if q["type"] == "photo":
+                        extra_answers_str[qid] = upload_results.get(f"extra_{qid}", "")
+
+                unique_id   = f"{ts}_{uid}"
+                submit_time = datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
+
+                row = [
+                    unique_id,
+                    str(tgl),
+                    promotor,
+                    program,
+                    jenis,
+                    brand,
+                    activity,
+                    rayon_final,
+                    zona_final,
+                    selected_customer.get(name_col, "") if selected_customer else "",
+                    kode,
+                    upload_results.get("sunblind", ""),
+                    upload_results.get("display",  ""),
+                    upload_results.get("kompensasi", ""),
+                    upload_results.get("ktp",      ""),
+                    st.session_state.gps_coords,
+                    catatan,
+                    submit_time,
+                ]
+                for q in free_visible:
+                    row.append(extra_answers_str.get(q["question_id"], ""))
+
+                # ── Simpan ke Sheets (dengan retry) ───────────────────────────
+                try:
+                    append_submission(row)
+                except Exception as exc:
+                    st.error(
+                        f"❌ Data gagal tersimpan ke Sheets: {exc}\n\n"
+                        f"**ID unik submission Anda: `{unique_id}`** — screenshot ini dan hubungi admin."
+                    )
+                    st.stop()
+
+                # ── Sukses — tampilkan peringatan foto gagal (non-fatal) ───────
+                st.session_state.submit_info = {
+                    "unique_id": unique_id,
+                    "outlet":    selected_customer.get(name_col, "-") if selected_customer else "-",
+                    "kode":      kode,
+                    "promotor":  promotor,
+                    "waktu":     submit_time,
+                    "foto_errors": upload_errors,
+                }
+                st.session_state.gps_coords = ""
+                # Hanya clear cache submission, bukan semua cache
+                load_submissions.clear()
+                st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: PUBLIC FORM  (?form=<form_id>)
