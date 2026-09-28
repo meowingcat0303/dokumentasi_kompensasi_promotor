@@ -1449,8 +1449,9 @@ if _PAGE == "admin":
         st.code(f"{_admin_base}/?inputdokumentasipromotor", language=None)
 
     # ── Tab Admin ─────────────────────────────────────────────────────────────
-    tab_formmanager, tab_formbuilder, tab_settings = st.tabs([
+    tab_formmanager, tab_monitoring, tab_formbuilder, tab_settings = st.tabs([
         "📋 Form Manager",
+        "📊 Monitoring Submission",
         "📝 Form Builder (Input Dokumentasi)",
         "⚙️ Pengaturan",
     ])
@@ -2101,6 +2102,163 @@ if _PAGE == "admin":
                     save_forms_list(fm_forms)
                     st.session_state.fm_forms = load_forms_list()
                     st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB: MONITORING SUBMISSION
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_monitoring:
+        st.subheader("Monitoring Investment")
+        today = datetime.datetime.now(WIB).date()
+
+        with st.spinner("Memuat data..."):
+            df_sub = load_submissions()
+
+        if df_sub.empty:
+            st.warning("Belum ada data submission.")
+        else:
+            df_sub.columns = [c.strip() for c in df_sub.columns]
+
+            st.subheader("Filter")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                eksekutor_list = ["Semua"] + sorted(df_sub["Eksekutor"].dropna().unique().tolist()) if "Eksekutor" in df_sub.columns else ["Semua"]
+                filter_eks = st.selectbox("Eksekutor", eksekutor_list, key="filter_eks")
+
+            with col2:
+                activity_list = ["Semua"] + sorted(df_sub["Activity"].dropna().unique().tolist()) if "Activity" in df_sub.columns else ["Semua"]
+                filter_act = st.selectbox("Activity (Termin)", activity_list, key="filter_act")
+
+            with col3:
+                program_list = ["Semua"] + sorted(df_sub["Program Investment"].dropna().unique().tolist()) if "Program Investment" in df_sub.columns else ["Semua"]
+                filter_prog = st.selectbox("Program", program_list, key="filter_prog")
+
+            df_view = df_sub.copy()
+            if filter_eks  != "Semua" and "Eksekutor"         in df_view.columns: df_view = df_view[df_view["Eksekutor"]         == filter_eks]
+            if filter_act  != "Semua" and "Activity"          in df_view.columns: df_view = df_view[df_view["Activity"]          == filter_act]
+            if filter_prog != "Semua" and "Program Investment" in df_view.columns: df_view = df_view[df_view["Program Investment"] == filter_prog]
+
+            st.divider()
+
+            deadlines   = []
+            countdowns  = []
+            warnings    = []
+            label_types = []
+
+            for _, row in df_view.iterrows():
+                activity = str(row.get("Activity", "")).strip()
+                date_str = str(row.get("Date", "")).strip()
+                deadline = compute_deadline(date_str, activity)
+
+                if deadline is None:
+                    deadlines.append("")
+                    countdowns.append("")
+                    warnings.append(False)
+                    label_types.append("")
+                else:
+                    label_types.append("Jatuh Tempo Termin 2" if activity == "Termin 1" else "Kontrak Berakhir")
+                    deadlines.append(str(deadline))
+                    cd, warn = countdown_label(deadline, today)
+                    countdowns.append(cd)
+                    warnings.append(warn)
+
+            df_view = df_view.copy()
+            df_view["Tipe Deadline"]    = label_types
+            df_view["Tanggal Deadline"] = deadlines
+            df_view["Countdown"]        = countdowns
+            df_view["_warn"]            = warnings
+
+            total_rows   = len(df_view)
+            warn_count   = df_view["_warn"].sum()
+            termin1_done = (df_view["Activity"] == "Termin 1").sum() if "Activity" in df_view.columns else 0
+            termin2_done = (df_view["Activity"] == "Termin 2").sum() if "Activity" in df_view.columns else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Submission", total_rows)
+            c2.metric("Termin 1", termin1_done)
+            c3.metric("Termin 2", termin2_done)
+            c4.metric("Perlu Perhatian", int(warn_count))
+
+            st.divider()
+            st.subheader("Detail Submission & Deadline")
+
+            display_cols = [c for c in [
+                "Date", "Eksekutor", "Program Investment", "Jenis Investment",
+                "Brand", "Activity", "Rayon", "Zona", "Nama Outlet", "Kode Customer",
+                "Tipe Deadline", "Tanggal Deadline", "Countdown",
+            ] if c in df_view.columns]
+
+            rows_html = ""
+            for _, row in df_view[display_cols + ["_warn"]].iterrows():
+                bg = ' style="background:#fff3cd"' if row["_warn"] else ""
+                cells = "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{row[c]}</td>" for c in display_cols)
+                rows_html += f"<tr{bg}>{cells}</tr>"
+
+            header_html = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#f0f2f6;text-align:left'>{c}</th>" for c in display_cols)
+
+            table_html = f"""
+            <div style="overflow-x:auto;max-height:600px;overflow-y:auto">
+            <table style="border-collapse:collapse;width:100%;font-size:13px">
+                <thead><tr>{header_html}</tr></thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+            </div>
+            """
+            st.components.v1.html(table_html, height=620, scrolling=True)
+            st.caption("Baris dengan latar kuning = deadline <= 21 hari atau sudah lewat.")
+
+            # ── Hapus Submission ───────────────────────────────────────────────
+            st.divider()
+            st.markdown("#### 🗑️ Hapus Submission")
+            st.caption("Pilih baris yang ingin dihapus. Foto di Google Drive juga akan ikut terhapus.")
+
+            _mon_id_col = next((c for c in df_sub.columns if "waktu" in c.lower() or "timestamp" in c.lower() or "id" in c.lower()), df_sub.columns[0] if not df_sub.empty else None)
+            if _mon_id_col:
+                _mon_labels = [
+                    f"Baris {i+1} — {str(row.get(_mon_id_col, ''))[:60]}"
+                    for i, (_, row) in enumerate(df_sub.iterrows())
+                ]
+                _mon_selected = st.selectbox("Pilih submission:", ["— Pilih —"] + _mon_labels, key="mon_del_select")
+
+                if _mon_selected != "— Pilih —":
+                    _mon_idx = _mon_labels.index(_mon_selected)
+                    _mon_row = df_sub.iloc[_mon_idx]
+
+                    with st.expander("👁️ Preview baris yang akan dihapus", expanded=True):
+                        for _c in df_sub.columns:
+                            _v = str(_mon_row.get(_c, ""))
+                            if _v:
+                                st.markdown(f"**{_c}:** {_v}")
+
+                    _mon_foto_urls = [
+                        str(_mon_row[c]) for c in df_sub.columns
+                        if "drive.google.com" in str(_mon_row.get(c, ""))
+                    ]
+                    if _mon_foto_urls:
+                        st.warning(f"⚠️ Baris ini memiliki **{len(_mon_foto_urls)} foto** yang akan ikut dihapus dari Google Drive.")
+
+                    _mon_confirm = st.checkbox("Saya yakin ingin menghapus submission ini beserta fotonya", key=f"mon_confirm_{_mon_idx}")
+
+                    if st.button("🗑️ Hapus Sekarang", type="primary", disabled=not _mon_confirm, key=f"mon_do_del_{_mon_idx}"):
+                        with st.spinner("Menghapus..."):
+                            _mon_foto_errors = []
+                            for _furl in _mon_foto_urls:
+                                ok = delete_from_drive(_furl)
+                                if not ok:
+                                    _mon_foto_errors.append(_furl)
+                            try:
+                                _mon_gc = get_gspread()
+                                _mon_ws = _mon_gc.open_by_key(SUBMISSION_SHEET_ID).worksheet("Submission")
+                                _mon_ws.delete_rows(_mon_idx + 2)
+                                load_submissions.clear()
+                                if _mon_foto_errors:
+                                    st.warning(f"✅ Submission dihapus, tapi {len(_mon_foto_errors)} foto gagal dihapus dari Drive.")
+                                else:
+                                    st.success("✅ Submission dan foto berhasil dihapus.")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as _mon_e:
+                                st.error(f"❌ Gagal menghapus: {_mon_e}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 1: FORM BUILDER (Input Dokumentasi)
