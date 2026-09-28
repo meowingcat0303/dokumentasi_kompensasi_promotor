@@ -651,6 +651,28 @@ def upload_to_drive(data: bytes, filename: str, retries: int = 3, script_url: st
                 continue
     raise last_exc
 
+# ── Drive file deleter ───────────────────────────────────────────────────────
+def delete_from_drive(file_url_or_id: str, script_url: str = "") -> bool:
+    """Hapus file dari Drive via Apps Script. Return True jika sukses."""
+    import re
+    target_url = script_url.strip() if script_url.strip() else APPS_SCRIPT_URL
+    # Ekstrak file ID dari URL drive.google.com/file/d/<ID>/view
+    match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", file_url_or_id)
+    file_id = match.group(1) if match else file_url_or_id.strip()
+    if not file_id:
+        return False
+    try:
+        resp = _requests.post(
+            target_url,
+            data={"action": "delete", "file_id": file_id},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("success", False)
+    except Exception:
+        return False
+
 # ── Submission writer ─────────────────────────────────────────────────────────
 def append_submission(row: list, retries: int = 3):
     """Tulis baris ke sheet Submission dengan retry."""
@@ -1941,6 +1963,69 @@ if _PAGE == "admin":
                         # Tampil tabel biasa tanpa deadline
                         st.metric("Total Submission", len(_fm_view))
                         st.dataframe(_fm_view, use_container_width=True, hide_index=True)
+
+                    # ── Hapus Submission ───────────────────────────────────────
+                    st.divider()
+                    st.markdown("#### 🗑️ Hapus Submission")
+                    st.caption("Pilih baris yang ingin dihapus. Foto di Google Drive juga akan ikut terhapus.")
+
+                    # Buat label per baris untuk selectbox
+                    _del_key = f"fm_del_{fid}"
+                    _id_col  = next((c for c in _fm_df.columns if "id" in c.lower() or "waktu" in c.lower() or "timestamp" in c.lower()), _fm_df.columns[0] if not _fm_df.empty else None)
+                    if _id_col:
+                        _row_labels = [
+                            f"Baris {i+1} — {str(row.get(_id_col, ''))[:60]}"
+                            for i, (_, row) in enumerate(_fm_df.iterrows())
+                        ]
+                        _selected_label = st.selectbox("Pilih submission yang ingin dihapus:", ["— Pilih —"] + _row_labels, key=_del_key)
+
+                        if _selected_label != "— Pilih —":
+                            _sel_idx = _row_labels.index(_selected_label)
+                            _sel_row = _fm_df.iloc[_sel_idx]
+
+                            # Tampilkan preview baris yang dipilih
+                            with st.expander("👁️ Preview baris yang akan dihapus", expanded=True):
+                                for _c in _fm_df.columns:
+                                    _v = str(_sel_row.get(_c, ""))
+                                    if _v:
+                                        st.markdown(f"**{_c}:** {_v}")
+
+                            # Deteksi kolom foto (URL Drive)
+                            _foto_cols = [
+                                c for c in _fm_df.columns
+                                if "drive.google.com" in str(_sel_row.get(c, ""))
+                                or "foto" in c.lower() or "photo" in c.lower() or "gambar" in c.lower()
+                            ]
+                            _foto_urls = [str(_sel_row[c]) for c in _foto_cols if "drive.google.com" in str(_sel_row.get(c, ""))]
+
+                            if _foto_urls:
+                                st.warning(f"⚠️ Baris ini memiliki **{len(_foto_urls)} foto** yang akan ikut dihapus dari Google Drive.")
+
+                            _confirm_del = st.checkbox("Saya yakin ingin menghapus submission ini beserta fotonya", key=f"confirm_del_{fid}_{_sel_idx}")
+
+                            if st.button("🗑️ Hapus Sekarang", type="primary", disabled=not _confirm_del, key=f"do_del_{fid}_{_sel_idx}"):
+                                with st.spinner("Menghapus..."):
+                                    # 1. Hapus foto dari Drive
+                                    _del_foto_errors = []
+                                    for _furl in _foto_urls:
+                                        ok = delete_from_drive(_furl, script_url=_fm_sheet_url and "" or "")
+                                        if not ok:
+                                            _del_foto_errors.append(_furl)
+
+                                    # 2. Hapus baris dari sheet (row index = _sel_idx + 2, karena header row 1)
+                                    try:
+                                        _del_gc   = get_gspread()
+                                        _del_ws   = _del_gc.open_by_key(_fm_sheet_id).sheet1
+                                        _del_ws.delete_rows(_sel_idx + 2)
+                                        load_submissions.clear()
+                                        if _del_foto_errors:
+                                            st.warning(f"✅ Submission dihapus, tapi {len(_del_foto_errors)} foto gagal dihapus dari Drive.")
+                                        else:
+                                            st.success("✅ Submission dan foto berhasil dihapus.")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    except Exception as _del_e:
+                                        st.error(f"❌ Gagal menghapus baris dari sheet: {_del_e}")
 
         else:
             # ── List semua form ────────────────────────────────────────────────
